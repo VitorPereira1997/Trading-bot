@@ -17,3 +17,10 @@ Substituir no GitHub `app.py` e `requirements.txt`. O Streamlit deverá fazer re
 
 ## Integridade
 A aplicação não preenche dados em falta por suposição. Campos indisponíveis aparecem como N/D/dados insuficientes. Cenários históricos não são previsões.
+
+## v6.1 - Correção multi-mercado e resolução de ticker
+- A carteira passou a ter uma coluna Mercado.
+- A app identifica o mercado pelo sufixo do ticker (.LS, .DE, .F, .PA, etc.).
+- Se um símbolo .DE não existir no Yahoo Finance, a app tenta a cotação .F e mostra explicitamente a substituição.
+- Na análise individual existe um seletor de mercado opcional para ajudar quando o ticker é introduzido sem sufixo.
+- A app mostra sempre o ticker efetivamente utilizado, mercado e moeda.

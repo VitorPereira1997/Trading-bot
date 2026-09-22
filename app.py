@@ -21,6 +21,62 @@ MARKETS = {
     'Suíça': ['NESN.SW','NOVN.SW','ROG.SW','UBSG.SW','ABBN.SW','ZURN.SW','SREN.SW','GIVN.SW'],
 }
 
+
+
+MARKET_SUFFIXES = {
+    'EUA': ['', None],
+    'Alemanha': ['.DE', '.F'],
+    'Portugal': ['.LS'],
+    'França': ['.PA'],
+    'Países Baixos': ['.AS'],
+    'Espanha': ['.MC'],
+    'Itália': ['.MI'],
+    'Reino Unido': ['.L'],
+    'Suíça': ['.SW'],
+}
+
+SUFFIX_MARKET = {
+    '.DE': 'Alemanha (Xetra)', '.F': 'Alemanha (Frankfurt)', '.LS': 'Portugal (Euronext Lisbon)',
+    '.PA': 'França (Euronext Paris)', '.AS': 'Países Baixos (Euronext Amsterdam)',
+    '.MC': 'Espanha (Madrid)', '.MI': 'Itália (Milão)', '.L': 'Reino Unido (LSE)',
+    '.SW': 'Suíça (SIX)'
+}
+
+def infer_market(ticker):
+    t = str(ticker).upper().strip()
+    for suffix, market in SUFFIX_MARKET.items():
+        if t.endswith(suffix):
+            return market
+    return 'EUA / símbolo sem sufixo'
+
+def ticker_candidates(ticker, market_hint=None):
+    t = str(ticker).upper().strip()
+    out = [t]
+    # Alguns títulos alemães existem no Yahoo apenas em Frankfurt (.F), mesmo quando
+    # o utilizador conhece o símbolo com sufixo .DE. Tentamos as duas praças sem esconder a troca.
+    if t.endswith('.DE'):
+        out.append(t[:-3] + '.F')
+    elif t.endswith('.F'):
+        out.append(t[:-2] + '.DE')
+    elif '.' not in t and market_hint in MARKET_SUFFIXES:
+        for suffix in MARKET_SUFFIXES[market_hint]:
+            if suffix:
+                out.append(t + suffix)
+    return list(dict.fromkeys(out))
+
+@st.cache_data(ttl=1800)
+def resolve_ticker(ticker, market_hint=None):
+    attempted = []
+    for candidate in ticker_candidates(ticker, market_hint):
+        attempted.append(candidate)
+        try:
+            probe = yf.download(candidate, period='1mo', interval='1d', auto_adjust=True, progress=False, threads=False)
+            if probe is not None and not probe.empty:
+                return candidate, infer_market(candidate), attempted
+        except Exception:
+            pass
+    raise ValueError('Ticker não encontrado. Tentativas: ' + ', '.join(attempted))
+
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = []
 
@@ -236,17 +292,20 @@ def market_regime():
     except Exception:
         return 'N/D'
 
-def analyze_asset(ticker):
-    raw=price_data(ticker,'5y','1d')
+def analyze_asset(ticker, market_hint=None):
+    requested = str(ticker).upper().strip()
+    resolved, market, attempts = resolve_ticker(requested, market_hint)
+    raw=price_data(resolved,'5y','1d')
     d=indicators(raw).dropna()
     if len(d) < 210:
         raise ValueError('Histórico insuficiente para análise técnica robusta.')
     row=d.iloc[-1]
     tech_score, tech_label, tech_tests=technical_score(row)
-    info,kind,fund_label,fund_score,complete,fund_table=fundamental_analysis(ticker)
+    info,kind,fund_label,fund_score,complete,fund_table=fundamental_analysis(resolved)
     entry,stop,target=entry_levels(row)
     scenarios=historical_scenarios(raw,row)
     return {
+        'requested_ticker':requested,'resolved_ticker':resolved,'market':market,'attempts':attempts,
         'raw':raw,'df':d,'row':row,'tech_score':tech_score,'tech_label':tech_label,'tech_tests':tech_tests,
         'info':info,'kind':kind,'fund_label':fund_label,'fund_score':fund_score,'fund_complete':complete,
         'fund_table':fund_table,'entry':entry,'stop':stop,'target':target,'scenarios':scenarios
@@ -273,7 +332,7 @@ def compact_candidate(ticker):
     price=float(row['Close'])
     price_eur=to_eur(price,currency)
     return {
-        'Ticker':ticker,'Tipo':a['kind'],'Mercado/moeda':currency,
+        'Ticker':a['resolved_ticker'],'Mercado':a['market'],'Tipo':a['kind'],'Moeda':currency,
         'Técnica':a['tech_label'],'Score técnico':a['tech_score'],
         'Fundamental/ETF':a['fund_label'],'Completude %':a['fund_complete'],
         'Preço':price,'Preço aprox. EUR':price_eur,
@@ -313,12 +372,16 @@ def backtest(ticker, score_min=75, max_days=20, cost_bps=10):
     return pd.DataFrame(trades)
 
 def source_block(ticker, a):
-    url=f'https://finance.yahoo.com/quote/{ticker}'
+    resolved = a.get('resolved_ticker', ticker)
+    market = a.get('market', infer_market(resolved))
+    url=f'https://finance.yahoo.com/quote/{resolved}'
     st.caption(
-        f"Fonte de mercado/fundamentais: Yahoo Finance via yfinance · referência de preço: {a['df'].index[-1]} · "
-        f"recolha da app: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        f"Fonte de mercado/fundamentais: Yahoo Finance via yfinance · símbolo usado: {resolved} · mercado: {market} · "
+        f"referência de preço: {a['df'].index[-1]} · recolha da app: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
     )
-    st.markdown(f'[Abrir fonte de dados de {ticker}]({url})')
+    if str(ticker).upper().strip() != resolved:
+        st.info(f"Símbolo introduzido: {str(ticker).upper().strip()} → símbolo encontrado e usado: {resolved} ({market}).")
+    st.markdown(f'[Abrir fonte de dados de {resolved}]({url})')
 
 TABS = st.tabs(['Plano de hoje','Analisar ativo','Minha carteira','Top 10','Desempenho','Metodologia'])
 
@@ -393,13 +456,18 @@ with TABS[0]:
 
 with TABS[1]:
     st.subheader('Analisar ação ou ETF')
-    t=st.text_input('Ticker',value='AAPL',key='single').upper().strip()
+    cta, ctb = st.columns([2,1])
+    with cta:
+        t=st.text_input('Ticker',value='AAPL',key='single').upper().strip()
+    with ctb:
+        market_hint=st.selectbox('Mercado (opcional)', ['Auto']+list(MARKETS.keys()), index=0, key='single_market')
     if st.button('Analisar',type='primary',key='single_btn'):
         try:
-            add_watchlist(t)
-            a=analyze_asset(t)
+            a=analyze_asset(t, None if market_hint=='Auto' else market_hint)
+            add_watchlist(a['resolved_ticker'])
             dec=decision(a)
             st.success(f'{dec} · {a["kind"]}') if dec!='AGUARDAR' else st.warning(f'{dec} · {a["kind"]}')
+            st.write(f"Símbolo usado: **{a['resolved_ticker']}** · Mercado: **{a['market']}** · Moeda: **{str(a['info'].get('currency') or 'N/D').upper()}**")
             m1,m2,m3,m4=st.columns(4)
             m1.metric('Preço',f'{a["entry"]:.2f}')
             m2.metric('Stop técnico',f'{a["stop"]:.2f}')
@@ -425,17 +493,20 @@ with TABS[1]:
 with TABS[2]:
     st.subheader('Minha carteira')
     st.caption('Introduz preço médio e preço alvo definidos por ti. A app calcula dados atuais e cenários históricos sem inventar um alvo.')
-    initial=pd.DataFrame([{'Ticker':'AAPL','Quantidade':1.0,'Preço médio':180.0,'Preço alvo':210.0}])
-    portfolio=st.data_editor(initial,num_rows='dynamic',hide_index=True,use_container_width=True)
+    initial=pd.DataFrame([{'Ticker':'AAPL','Mercado':'EUA','Quantidade':1.0,'Preço médio':180.0,'Preço alvo':210.0}])
+    portfolio=st.data_editor(
+        initial,num_rows='dynamic',hide_index=True,use_container_width=True,
+        column_config={'Mercado': st.column_config.SelectboxColumn('Mercado', options=list(MARKETS.keys()), required=False)}
+    )
     if st.button('Avaliar carteira',type='primary'):
         rows=[]
         for _,r in portfolio.iterrows():
-            t=str(r.get('Ticker','')).upper().strip(); q=float(r.get('Quantidade',0) or 0); pm=float(r.get('Preço médio',0) or 0); pa=float(r.get('Preço alvo',0) or 0)
+            t=str(r.get('Ticker','')).upper().strip(); market_hint=str(r.get('Mercado','') or '').strip(); q=float(r.get('Quantidade',0) or 0); pm=float(r.get('Preço médio',0) or 0); pa=float(r.get('Preço alvo',0) or 0)
             if not t or q<=0 or pm<=0 or pa<=0: continue
             try:
-                add_watchlist(t); a=analyze_asset(t)
+                a=analyze_asset(t, market_hint if market_hint in MARKETS else None); add_watchlist(a['resolved_ticker'])
                 price=float(a['row']['Close']); cur=str(a['info'].get('currency') or 'EUR').upper()
-                rows.append({'Ticker':t,'Tipo':a['kind'],'Moeda':cur,'Preço atual':price,'Quantidade':q,'Preço médio':pm,'P/L %':(price/pm-1)*100,'Preço alvo':pa,'Distância ao alvo %':(pa/price-1)*100,'Técnica':a['tech_label'],'Fundamental/ETF':a['fund_label'],'Decisão':decision(a)})
+                rows.append({'Ticker introduzido':t,'Ticker usado':a['resolved_ticker'],'Mercado':a['market'],'Tipo':a['kind'],'Moeda':cur,'Preço atual':price,'Quantidade':q,'Preço médio':pm,'P/L %':(price/pm-1)*100,'Preço alvo':pa,'Distância ao alvo %':(pa/price-1)*100,'Técnica':a['tech_label'],'Fundamental/ETF':a['fund_label'],'Decisão':decision(a)})
             except Exception as e:
                 rows.append({'Ticker':t,'Erro':str(e)})
         if rows: st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
