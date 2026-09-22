@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
@@ -10,72 +11,137 @@ st.title('📊 Analisador de Mercados')
 st.caption('Análise técnica + fundamental com dados identificados. Não envia ordens reais.')
 
 MARKETS = {
-    'EUA': ['AAPL','MSFT','NVDA','AMZN','META','GOOGL','AVGO','TSLA','JPM','V','MA','LLY','WMT','COST','NFLX','AMD','ORCL','CRM','ADBE','QCOM','XOM','CVX','KO','PEP','DIS','CAT','GE','IBM','SPY','QQQ','IWM','VOO','VTI'],
-    'Alemanha': ['SAP.DE','SIE.DE','ALV.DE','DTE.DE','MBG.DE','BMW.DE','BAS.DE','BAYN.DE','ADS.DE','RWE.DE','DBK.DE','IFX.DE','MUV2.DE','VOW3.DE','DHL.DE','EXS1.DE','EUNL.DE'],
-    'Portugal': ['EDP.LS','EDPR.LS','GALP.LS','JMT.LS','BCP.LS','SON.LS','REN.LS','SEM.LS','COR.LS','NOS.LS','ALTR.LS','IBS.LS'],
-    'França': ['MC.PA','OR.PA','TTE.PA','SAN.PA','AIR.PA','BNP.PA','SU.PA','CS.PA','DG.PA','KER.PA','CAP.PA','RMS.PA'],
-    'Países Baixos': ['ASML.AS','SHELL.AS','INGA.AS','PHIA.AS','AD.AS','HEIA.AS','PRX.AS','WKL.AS'],
-    'Espanha': ['SAN.MC','IBE.MC','ITX.MC','BBVA.MC','REP.MC','TEF.MC','ACS.MC','FER.MC'],
-    'Itália': ['ENI.MI','ENEL.MI','ISP.MI','UCG.MI','STM.MI','RACE.MI','G.MI','LDO.MI'],
-    'Reino Unido': ['AZN.L','SHEL.L','HSBA.L','ULVR.L','BP.L','RIO.L','GSK.L','LSEG.L','REL.L','BARC.L'],
-    'Suíça': ['NESN.SW','NOVN.SW','ROG.SW','UBSG.SW','ABBN.SW','ZURN.SW','SREN.SW','GIVN.SW'],
+    'EUA': ['AAPL.US','MSFT.US','NVDA.US','AMZN.US','META.US','GOOGL.US','AVGO.US','TSLA.US','JPM.US','V.US','MA.US','LLY.US','WMT.US','COST.US','NFLX.US','AMD.US','ORCL.US','CRM.US','ADBE.US','QCOM.US','XOM.US','CVX.US','KO.US','PEP.US','DIS.US','CAT.US','GE.US','IBM.US'],
+    'Alemanha': ['SAP.DE','SIE.DE','ALV.DE','DTE.DE','MBG.DE','BMW.DE','BAS.DE','BAYN.DE','ADS.DE','RWE.DE','DBK.DE','IFX.DE','MUV2.DE','VOW3.DE','DHL.DE','FB2A.DE'],
+    'Portugal': ['EDP.PT','EDPR.PT','GALP.PT','JMT.PT','BCP.PT','SON.PT','REN.PT','SEM.PT','COR.PT','NOS.PT','ALTR.PT','IBS.PT'],
+    'França': ['MC.FR','OR.FR','TTE.FR','SAN.FR','AIR.FR','BNP.FR','SU.FR','CS.FR','DG.FR','KER.FR','CAP.FR','RMS.FR'],
+    'Países Baixos': ['ASML.NL','SHELL.NL','INGA.NL','PHIA.NL','AD.NL','HEIA.NL','PRX.NL','WKL.NL'],
+    'Espanha': ['SAN1.ES','IBE.ES','ITX.ES','BBVA.ES','REP.ES','TEF.ES','ACS.ES','FER.ES'],
+    'Itália': ['ENI.IT','ENEL.IT','ISP.IT','UCG.IT','STM.IT','RACE.IT','G.IT','LDO.IT'],
+    'Reino Unido': ['AZN.UK','SHEL.UK','HSBA.UK','ULVR.UK','BP.UK','RIO.UK','GSK.UK','LSEG.UK','REL.UK','BARC.UK'],
+    'Suíça': ['NESN.CH','NOVN.CH','ROG.CH','UBSG.CH','ABBN.CH','ZURN.CH','SREN.CH','GIVN.CH'],
 }
 
-
-
-MARKET_SUFFIXES = {
-    'EUA': ['', None],
-    'Alemanha': ['.DE', '.F'],
-    'Portugal': ['.LS'],
-    'França': ['.PA'],
-    'Países Baixos': ['.AS'],
-    'Espanha': ['.MC'],
-    'Itália': ['.MI'],
-    'Reino Unido': ['.L'],
-    'Suíça': ['.SW'],
+# O ticker XTB é a identidade principal. O ticker técnico é apenas o símbolo necessário
+# ao fornecedor de dados (Yahoo Finance/yfinance) para obter séries e fundamentais.
+XTB_SUFFIX_MAP = {
+    '.US': {'source_suffix':'',    'market':'EUA',              'venue':'NASDAQ/NYSE (conforme instrumento)', 'expected_currency':'USD'},
+    '.DE': {'source_suffix':'.DE', 'market':'Alemanha',         'venue':'Xetra/Alemanha',                     'expected_currency':'EUR'},
+    '.PT': {'source_suffix':'.LS', 'market':'Portugal',         'venue':'Euronext Lisbon',                    'expected_currency':'EUR'},
+    '.NL': {'source_suffix':'.AS', 'market':'Países Baixos',    'venue':'Euronext Amsterdam',                 'expected_currency':'EUR'},
+    '.FR': {'source_suffix':'.PA', 'market':'França',           'venue':'Euronext Paris',                     'expected_currency':'EUR'},
+    '.ES': {'source_suffix':'.MC', 'market':'Espanha',          'venue':'Bolsa de Madrid',                    'expected_currency':'EUR'},
+    '.IT': {'source_suffix':'.MI', 'market':'Itália',           'venue':'Borsa Italiana',                     'expected_currency':'EUR'},
+    '.UK': {'source_suffix':'.L',  'market':'Reino Unido',      'venue':'London Stock Exchange',              'expected_currency':'GBP'},
+    '.CH': {'source_suffix':'.SW', 'market':'Suíça',            'venue':'SIX Swiss Exchange',                 'expected_currency':'CHF'},
 }
 
-SUFFIX_MARKET = {
-    '.DE': 'Alemanha (Xetra)', '.F': 'Alemanha (Frankfurt)', '.LS': 'Portugal (Euronext Lisbon)',
-    '.PA': 'França (Euronext Paris)', '.AS': 'Países Baixos (Euronext Amsterdam)',
-    '.MC': 'Espanha (Madrid)', '.MI': 'Itália (Milão)', '.L': 'Reino Unido (LSE)',
-    '.SW': 'Suíça (SIX)'
+# Exceções em que o símbolo base do fornecedor não coincide exatamente com o da XTB.
+# A app nunca troca silenciosamente de país/bolsa: estes aliases mantêm o mesmo instrumento económico/mercado.
+XTB_SOURCE_ALIASES = {
+    'ASML.NL':'ASML.AS',
+    'ASML.US':'ASML',
+    'META.US':'META',
+    'FB2A.DE':'FB2A.DE',
+    'EDP.PT':'EDP.LS',
+    'SAN1.ES':'SAN.MC',
 }
 
-def infer_market(ticker):
-    t = str(ticker).upper().strip()
-    for suffix, market in SUFFIX_MARKET.items():
+# Mapeamentos adicionais podem ser mantidos num CSV ao lado da app, sem alterar o código.
+_alias_file = Path(__file__).with_name('xtb_aliases.csv')
+if _alias_file.exists():
+    try:
+        _aliases_df = pd.read_csv(_alias_file)
+        for _, _r in _aliases_df.iterrows():
+            _x = str(_r.get('xtb_ticker','')).upper().strip()
+            _s = str(_r.get('source_ticker','')).upper().strip()
+            if _x and _s:
+                XTB_SOURCE_ALIASES[_x] = _s
+    except Exception:
+        pass
+
+SOURCE_TO_XTB_SUFFIX = {
+    '.DE':'.DE', '.LS':'.PT', '.AS':'.NL', '.PA':'.FR', '.MC':'.ES',
+    '.MI':'.IT', '.L':'.UK', '.SW':'.CH'
+}
+MARKET_XTB_SUFFIX = {
+    'EUA':'.US','Alemanha':'.DE','Portugal':'.PT','Países Baixos':'.NL',
+    'França':'.FR','Espanha':'.ES','Itália':'.IT','Reino Unido':'.UK','Suíça':'.CH'
+}
+
+def _xtb_suffix(ticker):
+    t=str(ticker).upper().strip()
+    for suffix in sorted(XTB_SUFFIX_MAP, key=len, reverse=True):
         if t.endswith(suffix):
-            return market
-    return 'EUA / símbolo sem sufixo'
+            return suffix
+    return None
 
-def ticker_candidates(ticker, market_hint=None):
-    t = str(ticker).upper().strip()
-    out = [t]
-    # Alguns títulos alemães existem no Yahoo apenas em Frankfurt (.F), mesmo quando
-    # o utilizador conhece o símbolo com sufixo .DE. Tentamos as duas praças sem esconder a troca.
-    if t.endswith('.DE'):
-        out.append(t[:-3] + '.F')
-    elif t.endswith('.F'):
-        out.append(t[:-2] + '.DE')
-    elif '.' not in t and market_hint in MARKET_SUFFIXES:
-        for suffix in MARKET_SUFFIXES[market_hint]:
-            if suffix:
-                out.append(t + suffix)
-    return list(dict.fromkeys(out))
+def xtb_to_source(ticker):
+    t=str(ticker).upper().strip()
+    if t in XTB_SOURCE_ALIASES:
+        return XTB_SOURCE_ALIASES[t]
+    suffix=_xtb_suffix(t)
+    if not suffix:
+        return t
+    base=t[:-len(suffix)]
+    return base + XTB_SUFFIX_MAP[suffix]['source_suffix']
+
+def source_to_xtb(ticker, market_hint=None):
+    t=str(ticker).upper().strip()
+    if market_hint in MARKET_XTB_SUFFIX and '.' not in t:
+        return t + MARKET_XTB_SUFFIX[market_hint]
+    for source_suffix, xtb_suffix in SOURCE_TO_XTB_SUFFIX.items():
+        if t.endswith(source_suffix):
+            return t[:-len(source_suffix)] + xtb_suffix
+    return t
+
+def instrument_identity(ticker, market_hint=None):
+    requested=str(ticker).upper().strip()
+    if not requested:
+        raise ValueError('Ticker vazio.')
+
+    # Se o utilizador já escreveu ticker XTB, preserva-o exatamente como identidade.
+    if _xtb_suffix(requested):
+        xtb=requested
+        source=xtb_to_source(xtb)
+    # Se escreveu um ticker Yahoo/bolsa conhecido, converte apenas o identificador visual.
+    elif any(requested.endswith(s) for s in SOURCE_TO_XTB_SUFFIX):
+        source=requested
+        xtb=source_to_xtb(requested, market_hint)
+    # Se escreveu só o símbolo base e indicou mercado, cria o ticker XTB desse mercado.
+    elif market_hint in MARKET_XTB_SUFFIX:
+        xtb=requested + MARKET_XTB_SUFFIX[market_hint]
+        source=xtb_to_source(xtb)
+    else:
+        # Compatibilidade com símbolos sem sufixo; a app não inventa o país.
+        xtb=requested
+        source=requested
+
+    suffix=_xtb_suffix(xtb)
+    meta=XTB_SUFFIX_MAP.get(suffix, {})
+    return {
+        'requested':requested,
+        'xtb_ticker':xtb,
+        'source_ticker':source,
+        'market':meta.get('market') or market_hint or 'Auto/N/D',
+        'venue':meta.get('venue') or 'N/D',
+        'expected_currency':meta.get('expected_currency'),
+    }
 
 @st.cache_data(ttl=1800)
-def resolve_ticker(ticker, market_hint=None):
-    attempted = []
-    for candidate in ticker_candidates(ticker, market_hint):
-        attempted.append(candidate)
-        try:
-            probe = yf.download(candidate, period='1mo', interval='1d', auto_adjust=True, progress=False, threads=False)
-            if probe is not None and not probe.empty:
-                return candidate, infer_market(candidate), attempted
-        except Exception:
-            pass
-    raise ValueError('Ticker não encontrado. Tentativas: ' + ', '.join(attempted))
+def resolve_instrument(ticker, market_hint=None):
+    ident=instrument_identity(ticker, market_hint)
+    source=ident['source_ticker']
+    try:
+        probe=yf.download(source, period='1mo', interval='1d', auto_adjust=True, progress=False, threads=False)
+    except Exception as e:
+        raise ValueError(f"Não foi possível validar {ident['xtb_ticker']} na fonte técnica ({source}).") from e
+    if probe is None or probe.empty:
+        raise ValueError(
+            f"Ticker XTB reconhecido como {ident['xtb_ticker']}, mas a fonte técnica não tem dados para {source}. "
+            "A app não substitui automaticamente por outra bolsa/moeda."
+        )
+    return ident
 
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = []
@@ -293,19 +359,30 @@ def market_regime():
         return 'N/D'
 
 def analyze_asset(ticker, market_hint=None):
-    requested = str(ticker).upper().strip()
-    resolved, market, attempts = resolve_ticker(requested, market_hint)
-    raw=price_data(resolved,'5y','1d')
+    ident=resolve_instrument(ticker, market_hint)
+    source=ident['source_ticker']
+    raw=price_data(source,'5y','1d')
     d=indicators(raw).dropna()
     if len(d) < 210:
         raise ValueError('Histórico insuficiente para análise técnica robusta.')
     row=d.iloc[-1]
     tech_score, tech_label, tech_tests=technical_score(row)
-    info,kind,fund_label,fund_score,complete,fund_table=fundamental_analysis(resolved)
+    info,kind,fund_label,fund_score,complete,fund_table=fundamental_analysis(source)
     entry,stop,target=entry_levels(row)
     scenarios=historical_scenarios(raw,row)
+    currency=str(info.get('currency') or ident.get('expected_currency') or 'N/D').upper()
+    company=str(info.get('longName') or info.get('shortName') or 'N/D')
+    exchange=str(info.get('exchange') or info.get('fullExchangeName') or ident.get('venue') or 'N/D')
     return {
-        'requested_ticker':requested,'resolved_ticker':resolved,'market':market,'attempts':attempts,
+        'requested_ticker':ident['requested'],
+        'xtb_ticker':ident['xtb_ticker'],
+        'source_ticker':source,
+        'market':ident['market'],
+        'venue':ident['venue'],
+        'company':company,
+        'exchange':exchange,
+        'currency':currency,
+        'expected_currency':ident.get('expected_currency'),
         'raw':raw,'df':d,'row':row,'tech_score':tech_score,'tech_label':tech_label,'tech_tests':tech_tests,
         'info':info,'kind':kind,'fund_label':fund_label,'fund_score':fund_score,'fund_complete':complete,
         'fund_table':fund_table,'entry':entry,'stop':stop,'target':target,'scenarios':scenarios
@@ -327,12 +404,13 @@ def universe_for(markets):
 def compact_candidate(ticker):
     a=analyze_asset(ticker)
     row=a['row']
-    info=a['info']
-    currency=str(info.get('currency') or 'EUR').upper()
+    currency=a['currency']
     price=float(row['Close'])
     price_eur=to_eur(price,currency)
     return {
-        'Ticker':a['resolved_ticker'],'Mercado':a['market'],'Tipo':a['kind'],'Moeda':currency,
+        'Ticker XTB':a['xtb_ticker'],'Ticker técnico':a['source_ticker'],
+        'Empresa':a['company'],'Mercado':a['market'],'Bolsa/fonte':a['exchange'],
+        'Tipo':a['kind'],'Moeda':currency,
         'Técnica':a['tech_label'],'Score técnico':a['tech_score'],
         'Fundamental/ETF':a['fund_label'],'Completude %':a['fund_complete'],
         'Preço':price,'Preço aprox. EUR':price_eur,
@@ -342,7 +420,8 @@ def compact_candidate(ticker):
     }
 
 def backtest(ticker, score_min=75, max_days=20, cost_bps=10):
-    raw=price_data(ticker,'10y','1d')
+    ident=resolve_instrument(ticker)
+    raw=price_data(ident['source_ticker'],'10y','1d')
     d=indicators(raw).dropna().copy()
     if len(d)<300: return pd.DataFrame()
     trades=[]
@@ -372,16 +451,24 @@ def backtest(ticker, score_min=75, max_days=20, cost_bps=10):
     return pd.DataFrame(trades)
 
 def source_block(ticker, a):
-    resolved = a.get('resolved_ticker', ticker)
-    market = a.get('market', infer_market(resolved))
-    url=f'https://finance.yahoo.com/quote/{resolved}'
+    source=a['source_ticker']
+    xtb=a['xtb_ticker']
+    url=f'https://finance.yahoo.com/quote/{source}'
     st.caption(
-        f"Fonte de mercado/fundamentais: Yahoo Finance via yfinance · símbolo usado: {resolved} · mercado: {market} · "
+        f"Identidade principal: XTB {xtb} · empresa: {a['company']} · mercado: {a['market']} · "
+        f"bolsa/fonte: {a['exchange']} · moeda: {a['currency']} · ticker técnico: {source} · "
         f"referência de preço: {a['df'].index[-1]} · recolha da app: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
     )
-    if str(ticker).upper().strip() != resolved:
-        st.info(f"Símbolo introduzido: {str(ticker).upper().strip()} → símbolo encontrado e usado: {resolved} ({market}).")
-    st.markdown(f'[Abrir fonte de dados de {resolved}]({url})')
+    if a.get('expected_currency') and a['currency'] != 'N/D' and a['currency'] != a['expected_currency']:
+        st.warning(
+            f"Validação de moeda: o ticker XTB sugere {a['expected_currency']}, mas a fonte técnica devolveu {a['currency']}. "
+            "Confirma o instrumento na XTB antes de usar estes dados."
+        )
+    if a['requested_ticker'] != xtb:
+        st.info(f"Símbolo introduzido: {a['requested_ticker']} → identidade XTB usada: {xtb} → ticker técnico: {source}.")
+    elif xtb != source:
+        st.info(f"Ticker XTB: {xtb} → ticker técnico usado apenas para dados: {source}. A identidade da posição continua a ser {xtb}.")
+    st.markdown(f'[Abrir fonte técnica de {source}]({url})')
 
 TABS = st.tabs(['Plano de hoje','Analisar ativo','Minha carteira','Top 10','Desempenho','Metodologia'])
 
@@ -420,8 +507,8 @@ with TABS[0]:
                     st.warning('AGUARDAR — nenhum ativo analisado passou simultaneamente os filtros técnico e fundamental/ETF definidos.')
                 else:
                     best=valid.iloc[0]
-                    a=next(x['_analysis'] for x in candidates if x['Ticker']==best['Ticker'])
-                    currency=str(a['info'].get('currency') or 'EUR').upper()
+                    a=next(x['_analysis'] for x in candidates if x['Ticker XTB']==best['Ticker XTB'])
+                    currency=a['currency'] if a['currency']!='N/D' else 'EUR'
                     entry_eur=to_eur(a['entry'],currency)
                     stop_eur=to_eur(a['stop'],currency)
                     if entry_eur is None or stop_eur is None:
@@ -433,13 +520,13 @@ with TABS[0]:
                         qty_capital=math.floor(available/entry_eur)
                         qty=max(0,min(qty_risk,qty_capital))
                         if qty < 1:
-                            st.warning(f"AGUARDAR — {best['Ticker']} passou os filtros, mas uma unidade inteira não cabe simultaneamente no capital e no risco definidos.")
+                            st.warning(f"AGUARDAR — {best['Ticker XTB']} passou os filtros, mas uma unidade inteira não cabe simultaneamente no capital e no risco definidos.")
                         else:
                             invested=qty*entry_eur
                             potential_loss=qty*risk_per_unit
                             target_eur=to_eur(a['target'],currency)
                             potential_gain=(target_eur-entry_eur)*qty if target_eur is not None else None
-                            st.success(f"CANDIDATO: {best['Ticker']} ({best['Tipo']})")
+                            st.success(f"CANDIDATO: {best['Ticker XTB']} ({best['Tipo']})")
                             x1,x2,x3,x4=st.columns(4)
                             x1.metric('Valor a usar',f'€{invested:.2f}')
                             x2.metric('Quantidade',str(qty))
@@ -450,7 +537,7 @@ with TABS[0]:
                             if not a['scenarios'].empty:
                                 st.markdown('**Cenários históricos comparáveis — não são previsões:**')
                                 st.dataframe(a['scenarios'],use_container_width=True,hide_index=True)
-                            source_block(best['Ticker'],a)
+                            source_block(best['Ticker XTB'],a)
                 st.markdown('**Candidatos analisados**')
                 st.dataframe(df.drop(columns=[],errors='ignore').sort_values(['Decisão','Score técnico'],ascending=[True,False]).head(25),use_container_width=True,hide_index=True)
 
@@ -458,16 +545,16 @@ with TABS[1]:
     st.subheader('Analisar ação ou ETF')
     cta, ctb = st.columns([2,1])
     with cta:
-        t=st.text_input('Ticker',value='AAPL',key='single').upper().strip()
+        t=st.text_input('Ticker',value='AAPL.US',key='single').upper().strip()
     with ctb:
         market_hint=st.selectbox('Mercado (opcional)', ['Auto']+list(MARKETS.keys()), index=0, key='single_market')
     if st.button('Analisar',type='primary',key='single_btn'):
         try:
             a=analyze_asset(t, None if market_hint=='Auto' else market_hint)
-            add_watchlist(a['resolved_ticker'])
+            add_watchlist(a['xtb_ticker'])
             dec=decision(a)
             st.success(f'{dec} · {a["kind"]}') if dec!='AGUARDAR' else st.warning(f'{dec} · {a["kind"]}')
-            st.write(f"Símbolo usado: **{a['resolved_ticker']}** · Mercado: **{a['market']}** · Moeda: **{str(a['info'].get('currency') or 'N/D').upper()}**")
+            st.write(f"Ticker XTB: **{a['xtb_ticker']}** · Empresa: **{a['company']}** · Mercado: **{a['market']}** · Moeda: **{a['currency']}** · Ticker técnico: **{a['source_ticker']}**")
             m1,m2,m3,m4=st.columns(4)
             m1.metric('Preço',f'{a["entry"]:.2f}')
             m2.metric('Stop técnico',f'{a["stop"]:.2f}')
@@ -493,20 +580,20 @@ with TABS[1]:
 with TABS[2]:
     st.subheader('Minha carteira')
     st.caption('Introduz preço médio e preço alvo definidos por ti. A app calcula dados atuais e cenários históricos sem inventar um alvo.')
-    initial=pd.DataFrame([{'Ticker':'AAPL','Mercado':'EUA','Quantidade':1.0,'Preço médio':180.0,'Preço alvo':210.0}])
+    initial=pd.DataFrame([{'Ticker XTB':'AAPL.US','Quantidade':1.0,'Preço médio':180.0,'Preço alvo':210.0}])
     portfolio=st.data_editor(
         initial,num_rows='dynamic',hide_index=True,use_container_width=True,
-        column_config={'Mercado': st.column_config.SelectboxColumn('Mercado', options=list(MARKETS.keys()), required=False)}
+        column_config={'Ticker XTB': st.column_config.TextColumn('Ticker XTB', help='Ex.: AAPL.US, ASML.NL, FB2A.DE, EDP.PT')}
     )
     if st.button('Avaliar carteira',type='primary'):
         rows=[]
         for _,r in portfolio.iterrows():
-            t=str(r.get('Ticker','')).upper().strip(); market_hint=str(r.get('Mercado','') or '').strip(); q=float(r.get('Quantidade',0) or 0); pm=float(r.get('Preço médio',0) or 0); pa=float(r.get('Preço alvo',0) or 0)
+            t=str(r.get('Ticker XTB','')).upper().strip(); q=float(r.get('Quantidade',0) or 0); pm=float(r.get('Preço médio',0) or 0); pa=float(r.get('Preço alvo',0) or 0)
             if not t or q<=0 or pm<=0 or pa<=0: continue
             try:
-                a=analyze_asset(t, market_hint if market_hint in MARKETS else None); add_watchlist(a['resolved_ticker'])
-                price=float(a['row']['Close']); cur=str(a['info'].get('currency') or 'EUR').upper()
-                rows.append({'Ticker introduzido':t,'Ticker usado':a['resolved_ticker'],'Mercado':a['market'],'Tipo':a['kind'],'Moeda':cur,'Preço atual':price,'Quantidade':q,'Preço médio':pm,'P/L %':(price/pm-1)*100,'Preço alvo':pa,'Distância ao alvo %':(pa/price-1)*100,'Técnica':a['tech_label'],'Fundamental/ETF':a['fund_label'],'Decisão':decision(a)})
+                a=analyze_asset(t); add_watchlist(a['xtb_ticker'])
+                price=float(a['row']['Close']); cur=a['currency']
+                rows.append({'Ticker XTB':a['xtb_ticker'],'Ticker técnico':a['source_ticker'],'Empresa':a['company'],'Mercado':a['market'],'Bolsa':a['exchange'],'Tipo':a['kind'],'Moeda':cur,'Preço atual':price,'Quantidade':q,'Preço médio':pm,'P/L %':(price/pm-1)*100,'Preço alvo':pa,'Distância ao alvo %':(pa/price-1)*100,'Técnica':a['tech_label'],'Fundamental/ETF':a['fund_label'],'Decisão':decision(a)})
             except Exception as e:
                 rows.append({'Ticker':t,'Erro':str(e)})
         if rows: st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
@@ -523,7 +610,7 @@ with TABS[3]:
                 try:
                     c=compact_candidate(t)
                     c.pop('_analysis',None)
-                    c['Na watchlist']='Sim' if t in st.session_state.watchlist else 'Não'
+                    c['Na watchlist']='Sim' if c['Ticker XTB'] in st.session_state.watchlist else 'Não'
                     rows.append(c)
                 except Exception:
                     pass
@@ -535,7 +622,7 @@ with TABS[3]:
 
 with TABS[4]:
     st.subheader('Desempenho histórico da regra técnica')
-    bt=st.text_input('Ticker para backtest',value='AAPL').upper().strip()
+    bt=st.text_input('Ticker para backtest',value='AAPL.US').upper().strip()
     b1,b2,b3=st.columns(3)
     with b1: score_min=st.slider('Score técnico mínimo',50,100,75,5)
     with b2: max_days=st.slider('Máximo dias em posição',5,60,20,5)
@@ -569,5 +656,7 @@ with TABS[5]:
 - **Dimensionamento pessoal** só é feito quando o utilizador introduz capital, perda máxima por operação e perda máxima diária.
 - **Ações acima do plafond não são ocultadas.** Podem aparecer no ranking; a app apenas impede dimensionamento incompatível com o capital/risco introduzido.
 - **Mercados suportados:** EUA, Alemanha, Portugal, França, Países Baixos, Espanha, Itália, Reino Unido e Suíça, conforme disponibilidade do fornecedor.
-- **Fonte atual:** Yahoo Finance via `yfinance`. Para decisões reais, confirma preço, spread, sessão e documentos da empresa/ETF na corretora e nas relações com investidores/regulador.
+- **Identidade do instrumento:** o ticker XTB é a chave principal (ex.: `AAPL.US`, `ASML.NL`, `FB2A.DE`, `EDP.PT`). O ticker técnico serve apenas para obter dados do fornecedor.
+- **Sem substituição silenciosa de bolsa:** se a fonte técnica não tiver o instrumento correspondente, a app devolve erro em vez de trocar para outra praça/moeda.
+- **Fonte atual de séries/fundamentais:** Yahoo Finance via `yfinance`. Para decisões reais, confirma preço, spread, sessão e documentos da empresa/ETF na XTB e nas relações com investidores/regulador.
 ''')
