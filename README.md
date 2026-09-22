@@ -1,22 +1,13 @@
-# Robot Trading Web v3
+# Robot Trading Web v4
 
-Inclui:
-- Análise individual;
-- Minha carteira;
-- Top 10 diário para Hoje e Próxima sessão;
-- Não exclui ações acima do plafond de €1.000;
-- Conversão aproximada USD/EUR para assinalar preço unitário acima do plafond;
-- Score técnico com tendência, RSI, momentum 20/60 dias, volume, ATR e médias móveis;
-- Liquidez média;
-- posição no intervalo de 52 semanas;
-- dados intradiários de 1h para o ranking Hoje quando disponíveis.
+Novidades:
+- tempo médio histórico até ao alvo na análise individual;
+- taxa histórica de atingir o alvo;
+- horizonte configurável em dias de mercado;
+- qualquer ação pesquisada entra automaticamente na watchlist;
+- ações da carteira também entram na watchlist;
+- Top 10 pode dar prioridade à watchlist;
+- Top 10 mostra tempo médio até ao alvo e taxa histórica;
+- ações acima do plafond continuam visíveis.
 
-## Atualização no Streamlit
-Substitui no GitHub:
-- app.py
-- requirements.txt
-
-Depois do commit, o Streamlit normalmente faz redeploy automaticamente.
-
-## Limitações
-Dados Yahoo/yfinance podem ter atraso. O score não é uma probabilidade de lucro nem uma recomendação automática.
+Nota: a watchlist é mantida durante a sessão atual do Streamlit. Para persistência permanente, é necessário guardar os dados externamente.
