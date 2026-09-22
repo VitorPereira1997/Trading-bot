@@ -1,27 +1,22 @@
-# Robot Trading Web
+# Robot Trading Web v3
 
-Versão web simples para telemóvel, feita com Streamlit.
+Inclui:
+- Análise individual;
+- Minha carteira;
+- Top 10 diário para Hoje e Próxima sessão;
+- Não exclui ações acima do plafond de €1.000;
+- Conversão aproximada USD/EUR para assinalar preço unitário acima do plafond;
+- Score técnico com tendência, RSI, momentum 20/60 dias, volume, ATR e médias móveis;
+- Liquidez média;
+- posição no intervalo de 52 semanas;
+- dados intradiários de 1h para o ranking Hoje quando disponíveis.
 
-## Publicar no Streamlit Community Cloud
+## Atualização no Streamlit
+Substitui no GitHub:
+- app.py
+- requirements.txt
 
-1. Cria uma conta no GitHub.
-2. Cria um novo repositório.
-3. Faz upload de `app.py` e `requirements.txt`.
-4. Vai a https://share.streamlit.io/
-5. Liga a conta GitHub.
-6. Seleciona o repositório e escolhe `app.py` como ficheiro principal.
-7. Carrega em Deploy.
+Depois do commit, o Streamlit normalmente faz redeploy automaticamente.
 
-Depois recebes um link que podes abrir no telemóvel.
-
-## O que faz
-
-- descarrega dados com yfinance;
-- calcula EMA 20, EMA 50, RSI 14, ATR 14 e volume médio;
-- mostra COMPRAR ou AGUARDAR segundo regras simples;
-- calcula entrada, stop, alvo e quantidade teórica;
-- não envia ordens reais.
-
-## Importante
-
-É um protótipo de simulação. Dados gratuitos podem ter atraso e não devem ser usados como feed profissional em tempo real.
+## Limitações
+Dados Yahoo/yfinance podem ter atraso. O score não é uma probabilidade de lucro nem uma recomendação automática.
