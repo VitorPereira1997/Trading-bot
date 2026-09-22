@@ -1,25 +1,19 @@
-# Robot Trading Web v5
+# Analisador de Mercados v6
 
-Novidades principais:
-- separador **Desempenho** com backtest histórico;
-- taxa de sucesso;
-- ganho médio e perda média;
-- expectativa média por operação;
-- drawdown máximo;
-- tempo médio em posição;
-- retorno acumulado simulado;
-- custos simulados em basis points (bps);
-- desempenho por regime de mercado;
-- curva de capital;
-- exportação das operações do backtest para CSV;
-- mantém análise individual, carteira, watchlist e Top 10 diário.
+Inclui:
+- Plano de hoje com capital disponível e limites de perda definidos pelo utilizador;
+- Ações e ETFs;
+- análise técnica e fundamental/qualidade ETF separadas;
+- cenários históricos de 5, 10, 15 e 30 dias;
+- mercados EUA, Alemanha, Portugal, França, Países Baixos, Espanha, Itália, Reino Unido e Suíça;
+- Top 10 global ou por mercados;
+- watchlist automática durante a sessão;
+- avaliação de carteira;
+- backtest técnico com custos;
+- indicação de fonte, data de referência e completude dos dados.
 
 ## Atualizar no Streamlit
-Substitui no GitHub:
-- `app.py`
-- `requirements.txt`
+Substituir no GitHub `app.py` e `requirements.txt`. O Streamlit deverá fazer redeploy após o commit.
 
-Depois do commit, o Streamlit deverá fazer redeploy automaticamente.
-
-## Nota
-O backtest usa regras simplificadas e dados diários. Não inclui impostos e não garante resultados futuros.
+## Integridade
+A aplicação não preenche dados em falta por suposição. Campos indisponíveis aparecem como N/D/dados insuficientes. Cenários históricos não são previsões.

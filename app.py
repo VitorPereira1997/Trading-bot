@@ -1,29 +1,33 @@
 import math
+from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-st.set_page_config(page_title='Robot Trading', page_icon='📈', layout='wide')
-st.title('📈 Robot Trading')
-st.caption('Análise, simulação e validação histórica. Não envia ordens reais.')
+st.set_page_config(page_title='Analisador de Mercados', page_icon='📊', layout='wide')
+st.title('📊 Analisador de Mercados')
+st.caption('Análise técnica + fundamental com dados identificados. Não envia ordens reais.')
 
-DEFAULT_UNIVERSE = [
-    'AAPL','MSFT','NVDA','AMZN','META','GOOGL','AVGO','TSLA','JPM','V',
-    'MA','LLY','WMT','COST','NFLX','AMD','ORCL','CRM','ADBE','QCOM',
-    'INTC','MU','UBER','PLTR','BAC','GS','XOM','CVX','KO','PEP',
-    'DIS','NKE','CAT','GE','IBM','NOW','AMAT','TXN','PANW','INTU'
-]
+MARKETS = {
+    'EUA': ['AAPL','MSFT','NVDA','AMZN','META','GOOGL','AVGO','TSLA','JPM','V','MA','LLY','WMT','COST','NFLX','AMD','ORCL','CRM','ADBE','QCOM','XOM','CVX','KO','PEP','DIS','CAT','GE','IBM','SPY','QQQ','IWM','VOO','VTI'],
+    'Alemanha': ['SAP.DE','SIE.DE','ALV.DE','DTE.DE','MBG.DE','BMW.DE','BAS.DE','BAYN.DE','ADS.DE','RWE.DE','DBK.DE','IFX.DE','MUV2.DE','VOW3.DE','DHL.DE','EXS1.DE','EUNL.DE'],
+    'Portugal': ['EDP.LS','EDPR.LS','GALP.LS','JMT.LS','BCP.LS','SON.LS','REN.LS','SEM.LS','COR.LS','NOS.LS','ALTR.LS','IBS.LS'],
+    'França': ['MC.PA','OR.PA','TTE.PA','SAN.PA','AIR.PA','BNP.PA','SU.PA','CS.PA','DG.PA','KER.PA','CAP.PA','RMS.PA'],
+    'Países Baixos': ['ASML.AS','SHELL.AS','INGA.AS','PHIA.AS','AD.AS','HEIA.AS','PRX.AS','WKL.AS'],
+    'Espanha': ['SAN.MC','IBE.MC','ITX.MC','BBVA.MC','REP.MC','TEF.MC','ACS.MC','FER.MC'],
+    'Itália': ['ENI.MI','ENEL.MI','ISP.MI','UCG.MI','STM.MI','RACE.MI','G.MI','LDO.MI'],
+    'Reino Unido': ['AZN.L','SHEL.L','HSBA.L','ULVR.L','BP.L','RIO.L','GSK.L','LSEG.L','REL.L','BARC.L'],
+    'Suíça': ['NESN.SW','NOVN.SW','ROG.SW','UBSG.SW','ABBN.SW','ZURN.SW','SREN.SW','GIVN.SW'],
+}
 
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = []
 
-
 def add_watchlist(ticker):
-    t = ticker.upper().strip()
+    t = str(ticker).upper().strip()
     if t and t not in st.session_state.watchlist:
         st.session_state.watchlist.append(t)
-
 
 def rsi(series, period=14):
     delta = series.diff()
@@ -34,475 +38,465 @@ def rsi(series, period=14):
     rs = avg_gain / avg_loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
-
 def atr(df, period=14):
-    prev_close = df['Close'].shift(1)
-    tr = pd.concat([
-        df['High'] - df['Low'],
-        (df['High'] - prev_close).abs(),
-        (df['Low'] - prev_close).abs()
-    ], axis=1).max(axis=1)
+    pc = df['Close'].shift(1)
+    tr = pd.concat([(df['High']-df['Low']), (df['High']-pc).abs(), (df['Low']-pc).abs()], axis=1).max(axis=1)
     return tr.ewm(alpha=1/period, adjust=False).mean()
 
-
-def preparar_indicadores(df):
+def indicators(df):
     d = df.copy()
     d['EMA20'] = d['Close'].ewm(span=20, adjust=False).mean()
     d['EMA50'] = d['Close'].ewm(span=50, adjust=False).mean()
     d['EMA200'] = d['Close'].ewm(span=200, adjust=False).mean()
-    d['RSI14'] = rsi(d['Close'], 14)
-    d['ATR14'] = atr(d, 14)
+    d['RSI14'] = rsi(d['Close'])
+    d['ATR14'] = atr(d)
     d['VOL20'] = d['Volume'].rolling(20).mean()
-    d['RET20'] = d['Close'].pct_change(20) * 100
-    d['RET60'] = d['Close'].pct_change(60) * 100
+    d['RET20'] = d['Close'].pct_change(20)*100
+    d['RET60'] = d['Close'].pct_change(60)*100
     d['HIGH252'] = d['High'].rolling(252, min_periods=60).max()
     d['LOW252'] = d['Low'].rolling(252, min_periods=60).min()
-    d['DOLLAR_VOL20'] = (d['Close'] * d['Volume']).rolling(20).mean()
+    d['VALUE20'] = (d['Close']*d['Volume']).rolling(20).mean()
     return d
 
-
 @st.cache_data(ttl=300)
-def obter_dados(ticker, period='5y', interval='1d'):
-    df = yf.download(
-        ticker,
-        period=period,
-        interval=interval,
-        auto_adjust=True,
-        progress=False,
-        threads=False,
-    )
+def price_data(ticker, period='5y', interval='1d'):
+    df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False, threads=False)
     if df.empty:
-        raise ValueError(f'Sem dados para {ticker}.')
+        raise ValueError(f'Sem dados de mercado para {ticker}.')
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df.dropna().copy()
 
+@st.cache_data(ttl=1800)
+def asset_info(ticker):
+    t = yf.Ticker(ticker)
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+    return info
 
 @st.cache_data(ttl=900)
-def eurusd():
+def fx_per_eur(currency):
+    currency = (currency or 'EUR').upper()
+    if currency == 'EUR':
+        return 1.0
+    pair = {'USD':'EURUSD=X','GBP':'EURGBP=X','CHF':'EURCHF=X'}.get(currency)
+    if not pair:
+        return None
     try:
-        fx = yf.download('EURUSD=X', period='5d', interval='1d', auto_adjust=True, progress=False, threads=False)
-        if isinstance(fx.columns, pd.MultiIndex):
-            fx.columns = fx.columns.get_level_values(0)
-        return float(fx['Close'].dropna().iloc[-1])
+        d = price_data(pair, '5d', '1d')
+        return float(d['Close'].iloc[-1])
     except Exception:
         return None
 
+def to_eur(value, currency):
+    rate = fx_per_eur(currency)
+    if rate is None or rate <= 0:
+        return None
+    return float(value)/rate
 
-def estimar_tempo_alvo(df, movimento_pct, max_dias=90):
-    closes = df['Close'].dropna()
-    if len(closes) < 120 or movimento_pct <= 0:
-        return None, None, 0
-    tempos = []
-    amostras = 0
-    for i in range(0, len(closes) - max_dias - 1, 5):
-        inicial = float(closes.iloc[i])
-        alvo = inicial * (1 + movimento_pct/100)
-        futuro = closes.iloc[i+1:i+1+max_dias]
-        amostras += 1
-        atingiu = futuro[futuro >= alvo]
-        if not atingiu.empty:
-            tempos.append(int(futuro.index.get_loc(atingiu.index[0]) + 1))
-    if amostras == 0:
-        return None, None, 0
-    if not tempos:
-        return None, 0.0, amostras
-    return float(np.mean(tempos)), len(tempos)/amostras*100, amostras
+def technical_score(row):
+    tests = {
+        'Preço acima EMA20': bool(row['Close'] > row['EMA20']),
+        'EMA20 acima EMA50': bool(row['EMA20'] > row['EMA50']),
+        'EMA50 acima EMA200': bool(row['EMA50'] > row['EMA200']),
+        'RSI entre 50 e 68': bool(50 <= row['RSI14'] <= 68),
+        'Momentum 20d positivo': bool(row['RET20'] > 0),
+        'Momentum 60d positivo': bool(row['RET60'] > 0),
+        'Volume >= média 20d': bool(row['Volume'] >= row['VOL20']),
+        'ATR entre 0,8% e 6%': bool(0.8 <= (row['ATR14']/row['Close']*100) <= 6),
+    }
+    passed = sum(tests.values())
+    score = passed/len(tests)*100
+    label = 'Forte' if passed >= 6 else ('Neutro' if passed >= 4 else 'Fraco')
+    return round(score,1), label, tests
 
+def _num(info, key):
+    v = info.get(key)
+    return float(v) if isinstance(v, (int,float,np.integer,np.floating)) and np.isfinite(v) else None
 
-def score_tecnico(row):
-    trend = 0
-    if row['Close'] > row['EMA20']:
-        trend += 15
-    if row['EMA20'] > row['EMA50']:
-        trend += 15
-    if row['EMA50'] > row['EMA200']:
-        trend += 15
+def fundamental_equity(info):
+    # Critérios transparentes; dados em falta não contam como aprovados nem reprovados.
+    specs = [
+        ('Crescimento receitas > 0', 'revenueGrowth', lambda x: x > 0),
+        ('Crescimento lucros > 0', 'earningsGrowth', lambda x: x > 0),
+        ('Margem operacional > 10%', 'operatingMargins', lambda x: x > 0.10),
+        ('Margem líquida > 8%', 'profitMargins', lambda x: x > 0.08),
+        ('ROE > 10%', 'returnOnEquity', lambda x: x > 0.10),
+        ('Fluxo de caixa livre positivo', 'freeCashflow', lambda x: x > 0),
+        ('Caixa operacional positivo', 'operatingCashflow', lambda x: x > 0),
+        ('Dívida/Capital próprio < 150%', 'debtToEquity', lambda x: x < 150),
+    ]
+    rows=[]
+    passed=0
+    available=0
+    for name,key,fn in specs:
+        v=_num(info,key)
+        ok=None if v is None else bool(fn(v))
+        if v is not None:
+            available += 1
+            passed += int(ok)
+        rows.append({'Critério':name,'Valor':v,'Cumpre':('Sim' if ok else 'Não') if ok is not None else 'N/D'})
+    completeness = available/len(specs)*100
+    ratio = passed/available if available else 0
+    label = 'Dados insuficientes' if available < 5 else ('Forte' if ratio >= 0.70 else ('Neutro' if ratio >= 0.45 else 'Fraco'))
+    return label, round(ratio*100,1) if available else None, round(completeness,1), pd.DataFrame(rows)
 
-    rv = float(row['RSI14'])
-    if 50 <= rv <= 65:
-        rsi_score = 15
-    elif 45 <= rv < 50 or 65 < rv <= 72:
-        rsi_score = 8
+def fundamental_etf(info):
+    specs=[]
+    expense=_num(info,'annualReportExpenseRatio')
+    if expense is None: expense=_num(info,'expenseRatio')
+    assets=_num(info,'totalAssets')
+    avgvol=_num(info,'averageVolume')
+    nav=_num(info,'navPrice')
+    ytd=_num(info,'ytdReturn')
+    raw=[
+        ('TER <= 0,50%', expense, lambda x: x <= 0.005),
+        ('Ativos >= 500 M', assets, lambda x: x >= 500_000_000),
+        ('Volume médio >= 100 mil', avgvol, lambda x: x >= 100_000),
+        ('NAV disponível', nav, lambda x: x > 0),
+        ('Retorno YTD disponível', ytd, lambda x: np.isfinite(x)),
+    ]
+    passed=0; available=0
+    for name,v,fn in raw:
+        ok=None if v is None else bool(fn(v))
+        if v is not None:
+            available += 1; passed += int(ok)
+        specs.append({'Critério':name,'Valor':v,'Cumpre':('Sim' if ok else 'Não') if ok is not None else 'N/D'})
+    completeness = available/len(raw)*100
+    ratio = passed/available if available else 0
+    label = 'Dados insuficientes' if available < 3 else ('Forte' if ratio >= 0.70 else ('Neutro' if ratio >= 0.45 else 'Fraco'))
+    return label, round(ratio*100,1) if available else None, round(completeness,1), pd.DataFrame(specs)
+
+def asset_kind(info):
+    qt = str(info.get('quoteType','')).upper()
+    return 'ETF' if qt == 'ETF' else 'Ação'
+
+def fundamental_analysis(ticker):
+    info = asset_info(ticker)
+    kind = asset_kind(info)
+    if kind == 'ETF':
+        label, score, completeness, table = fundamental_etf(info)
     else:
-        rsi_score = 2
+        label, score, completeness, table = fundamental_equity(info)
+    return info, kind, label, score, completeness, table
 
-    def norm(v, lo, hi):
-        return max(0.0, min(1.0, (v-lo)/(hi-lo))) * 100
-
-    mom20 = norm(float(row['RET20']), -10, 15) * 0.10
-    mom60 = norm(float(row['RET60']), -20, 30) * 0.10
-    vr = float(row['Volume']/row['VOL20']) if row['VOL20'] > 0 else 0
-    volume_score = norm(vr, 0.7, 2.0) * 0.10
-    atr_pct = float(row['ATR14']/row['Close']*100)
-    if 1.0 <= atr_pct <= 4.5:
-        atr_score = 10
-    elif 0.5 <= atr_pct < 1.0 or 4.5 < atr_pct <= 7.0:
-        atr_score = 5
-    else:
-        atr_score = 1
-    return round(min(100.0, trend+rsi_score+mom20+mom60+volume_score+atr_score), 1)
-
-
-def risco_alvo(row, preco=None):
-    entrada = float(preco if preco is not None else row['Close'])
-    a = float(row['ATR14'])
-    stop = entrada - 1.5*a
-    alvo = entrada + 2.0*(entrada-stop)
-    return entrada, stop, alvo
-
-
-def classificar_liquidez(v):
-    if pd.isna(v):
-        return 'N/D'
-    if v >= 1_000_000_000:
-        return 'Muito alta'
-    if v >= 250_000_000:
-        return 'Alta'
-    if v >= 50_000_000:
-        return 'Média'
-    return 'Baixa'
-
-
-def pos52(row):
-    hi, lo, c = float(row['HIGH252']), float(row['LOW252']), float(row['Close'])
-    if not np.isfinite(hi) or not np.isfinite(lo) or hi <= lo:
-        return np.nan
-    return (c-lo)/(hi-lo)*100
-
-
-def analisar_universo(tickers, modo='proxima', horizonte_alvo=90):
-    resultados = []
-    fx = eurusd()
-    for ticker in tickers:
-        try:
-            daily_raw = obter_dados(ticker, '5y', '1d')
-            daily = preparar_indicadores(daily_raw).dropna()
-            if len(daily) < 210:
-                continue
-            row = daily.iloc[-1]
-            preco_ref = float(row['Close'])
-            data_ref = daily.index[-1]
-            intraday_change = np.nan
-            intraday_volume_ratio = np.nan
-            if modo == 'hoje':
-                try:
-                    intra = obter_dados(ticker, '60d', '1h')
-                    if len(intra) >= 20:
-                        preco_ref = float(intra['Close'].iloc[-1])
-                        data_ref = intra.index[-1]
-                        if len(intra) >= 2:
-                            intraday_change = (float(intra['Close'].iloc[-1])/float(intra['Close'].iloc[-2])-1)*100
-                        vol20h = intra['Volume'].rolling(20).mean().iloc[-1]
-                        if pd.notna(vol20h) and vol20h > 0:
-                            intraday_volume_ratio = float(intra['Volume'].iloc[-1]/vol20h)
-                except Exception:
-                    pass
-
-            entrada, stop, alvo = risco_alvo(row, preco_ref if modo == 'hoje' else None)
-            score = score_tecnico(row)
-            if modo == 'hoje' and pd.notna(intraday_change):
-                score += max(-5, min(5, intraday_change*2))
-                if pd.notna(intraday_volume_ratio):
-                    score += max(-3, min(3, (intraday_volume_ratio-1)*2))
-                score = round(max(0, min(100, score)), 1)
-
-            mov_pct = (alvo/entrada-1)*100
-            tempo, taxa, _ = estimar_tempo_alvo(daily_raw, mov_pct, horizonte_alvo)
-            eur = preco_ref/fx if fx and fx > 0 else None
-            acima = eur > 1000 if eur is not None else None
-
-            resultados.append({
-                'Ticker':ticker,
-                'Score técnico':score,
-                'Preço ref. USD':preco_ref,
-                'Preço aprox. EUR':eur,
-                'Acima plafond €1000':'Sim' if acima else ('Não' if acima is not None else 'N/D'),
-                'Entrada ref.':entrada,
-                'Stop':stop,
-                'Alvo':alvo,
-                'Tempo médio até alvo':f'{tempo:.1f} dias de mercado' if tempo is not None else 'Sem histórico suficiente',
-                'Taxa histórica alvo %':taxa,
-                'Risco/Retorno':'1:2',
-                'RSI':float(row['RSI14']),
-                'Momentum 20d %':float(row['RET20']),
-                'Momentum 60d %':float(row['RET60']),
-                'ATR %':float(row['ATR14']/row['Close']*100),
-                'Volume rel.':float(row['Volume']/row['VOL20']) if row['VOL20'] > 0 else np.nan,
-                'Liquidez média':classificar_liquidez(float(row['DOLLAR_VOL20'])),
-                'Posição 52 semanas %':pos52(row),
-                'Variação última hora %':intraday_change,
-                'Volume rel. 1h':intraday_volume_ratio,
-                'Data/hora referência':str(data_ref),
-            })
-        except Exception:
-            continue
-    if not resultados:
-        return pd.DataFrame()
-    return pd.DataFrame(resultados).sort_values('Score técnico', ascending=False).reset_index(drop=True)
-
-
-def regime_mercado(spy_row):
-    if spy_row['Close'] > spy_row['EMA50'] > spy_row['EMA200']:
-        return 'Tendência de alta'
-    if spy_row['Close'] < spy_row['EMA50'] < spy_row['EMA200']:
-        return 'Tendência de baixa'
-    return 'Lateral/misto'
-
-
-def backtest_ticker(ticker, score_min=70, holding_max=20, custo_bps=10):
-    raw = obter_dados(ticker, '10y', '1d')
-    d = preparar_indicadores(raw).dropna().copy()
+def historical_scenarios(raw, current_row, horizons=(5,10,15,30)):
+    d = indicators(raw).dropna().copy()
     if len(d) < 260:
         return pd.DataFrame()
-
-    spy = preparar_indicadores(obter_dados('SPY', '10y', '1d')).dropna()
-    spy_reg = pd.Series(index=spy.index, data=[regime_mercado(spy.loc[i]) for i in spy.index])
-
-    trades = []
-    i = 0
-    while i < len(d)-holding_max-1:
-        row = d.iloc[i]
-        score = score_tecnico(row)
-        if score < score_min:
-            i += 1
-            continue
-
-        entrada = float(d['Open'].iloc[i+1])
-        atr_abs = float(row['ATR14'])
-        stop = entrada - 1.5*atr_abs
-        alvo = entrada + 2*(entrada-stop)
-        exit_price = None
-        exit_idx = None
-        outcome = None
-
-        future = d.iloc[i+1:i+1+holding_max]
-        for j, (_, fr) in enumerate(future.iterrows(), start=1):
-            low = float(fr['Low'])
-            high = float(fr['High'])
-            # Conservador: se alvo e stop forem tocados no mesmo dia, assume stop primeiro.
-            if low <= stop:
-                exit_price = stop
-                exit_idx = i+j
-                outcome = 'Stop'
-                break
-            if high >= alvo:
-                exit_price = alvo
-                exit_idx = i+j
-                outcome = 'Alvo'
-                break
-
-        if exit_price is None:
-            exit_idx = i+holding_max
-            exit_price = float(d['Close'].iloc[exit_idx])
-            outcome = 'Tempo'
-
-        gross_ret = (exit_price/entrada - 1)*100
-        cost_pct = custo_bps/100.0  # bps ida+volta aproximados em percentagem
-        net_ret = gross_ret - cost_pct
-        dt_entry = d.index[i+1]
-        regime = spy_reg.reindex([dt_entry], method='ffill').iloc[0] if not spy_reg.empty else 'N/D'
-
-        trades.append({
-            'Ticker':ticker,
-            'Data entrada':dt_entry,
-            'Data saída':d.index[exit_idx],
-            'Score':score,
-            'Entrada':entrada,
-            'Saída':exit_price,
-            'Resultado':outcome,
-            'Retorno bruto %':gross_ret,
-            'Retorno líquido %':net_ret,
-            'Dias de mercado':exit_idx-(i+1)+1,
-            'Regime':regime,
+    current_score,_,_ = technical_score(current_row)
+    curr_rsi=float(current_row['RSI14'])
+    curr_trend = bool(current_row['EMA20'] > current_row['EMA50'] > current_row['EMA200'])
+    rows=[]
+    for i in range(200, len(d)-max(horizons)):
+        r=d.iloc[i]
+        sc,_,_=technical_score(r)
+        tr=bool(r['EMA20'] > r['EMA50'] > r['EMA200'])
+        if abs(sc-current_score) <= 12.5 and abs(float(r['RSI14'])-curr_rsi) <= 7 and tr == curr_trend:
+            rec={'i':i}
+            for h in horizons:
+                rec[h]=(float(d['Close'].iloc[i+h])/float(r['Close'])-1)*100
+            rows.append(rec)
+    if len(rows) < 10:
+        return pd.DataFrame()
+    hist=pd.DataFrame(rows)
+    current=float(current_row['Close'])
+    out=[]
+    for h in horizons:
+        s=hist[h].dropna()
+        out.append({
+            'Horizonte':f'{h} dias de mercado',
+            'Amostras':len(s),
+            'Retorno mediano %':float(s.median()),
+            'Percentil 25 %':float(s.quantile(.25)),
+            'Percentil 75 %':float(s.quantile(.75)),
+            'Casos positivos %':float((s>0).mean()*100),
+            'Nível mediano histórico':current*(1+float(s.median())/100),
         })
-        i = exit_idx + 1
-    return pd.DataFrame(trades)
+    return pd.DataFrame(out)
 
+def entry_levels(row):
+    entry=float(row['Close'])
+    a=float(row['ATR14'])
+    stop=entry-1.5*a
+    target=entry+2*(entry-stop)
+    return entry,stop,target
 
-def resumo_backtest(trades):
-    if trades.empty:
-        return None
-    rets = trades['Retorno líquido %']
-    wins = rets[rets > 0]
-    losses = rets[rets <= 0]
-    win_rate = (rets > 0).mean()*100
-    avg_win = wins.mean() if len(wins) else 0.0
-    avg_loss = losses.mean() if len(losses) else 0.0
-    expectancy = rets.mean()
+def market_regime():
+    try:
+        d=indicators(price_data('SPY','2y','1d')).dropna()
+        r=d.iloc[-1]
+        if r['Close'] > r['EMA50'] > r['EMA200']:
+            return 'Alta'
+        if r['Close'] < r['EMA50'] < r['EMA200']:
+            return 'Baixa'
+        return 'Misto/lateral'
+    except Exception:
+        return 'N/D'
 
-    equity = (1 + rets/100).cumprod()
-    peak = equity.cummax()
-    dd = (equity/peak - 1)*100
-    max_dd = dd.min() if len(dd) else 0.0
-
+def analyze_asset(ticker):
+    raw=price_data(ticker,'5y','1d')
+    d=indicators(raw).dropna()
+    if len(d) < 210:
+        raise ValueError('Histórico insuficiente para análise técnica robusta.')
+    row=d.iloc[-1]
+    tech_score, tech_label, tech_tests=technical_score(row)
+    info,kind,fund_label,fund_score,complete,fund_table=fundamental_analysis(ticker)
+    entry,stop,target=entry_levels(row)
+    scenarios=historical_scenarios(raw,row)
     return {
-        'trades':len(trades),
-        'win_rate':win_rate,
-        'avg_win':avg_win,
-        'avg_loss':avg_loss,
-        'expectancy':expectancy,
-        'max_dd':max_dd,
-        'avg_days':trades['Dias de mercado'].mean(),
-        'net_total':(equity.iloc[-1]-1)*100 if len(equity) else 0.0,
+        'raw':raw,'df':d,'row':row,'tech_score':tech_score,'tech_label':tech_label,'tech_tests':tech_tests,
+        'info':info,'kind':kind,'fund_label':fund_label,'fund_score':fund_score,'fund_complete':complete,
+        'fund_table':fund_table,'entry':entry,'stop':stop,'target':target,'scenarios':scenarios
     }
 
+def decision(a):
+    # Regra transparente: ambos os blocos devem ser fortes e dados fundamentais suficientemente completos.
+    if a['tech_label']=='Forte' and a['fund_label']=='Forte' and a['fund_complete'] >= 60:
+        return 'CANDIDATO A ENTRADA'
+    return 'AGUARDAR'
 
-tab1, tab2, tab3, tab4 = st.tabs(['Analisar ação','Minha carteira','Top 10 diário','Desempenho'])
+def universe_for(markets):
+    out=[]
+    for m in markets:
+        out += MARKETS[m]
+    out += st.session_state.watchlist
+    return list(dict.fromkeys(out))
 
-with tab1:
-    st.subheader('Analisar uma ação')
-    c1,c2,c3,c4,c5 = st.columns(5)
-    with c1:
-        ticker = st.text_input('Ticker', 'AAPL').upper().strip()
-    with c2:
-        capital = st.number_input('Capital simulação (€)', min_value=100.0, value=1000.0, step=100.0)
-    with c3:
-        risco_pct = st.number_input('Risco por operação (%)', min_value=0.1, max_value=5.0, value=0.5, step=0.1)
-    with c4:
-        periodo = st.selectbox('Histórico', ['1y','2y','5y'], index=1)
-    with c5:
-        horizonte = st.selectbox('Horizonte alvo', [30,60,90,120,180], index=2, format_func=lambda x:f'{x} dias de mercado')
+def compact_candidate(ticker):
+    a=analyze_asset(ticker)
+    row=a['row']
+    info=a['info']
+    currency=str(info.get('currency') or 'EUR').upper()
+    price=float(row['Close'])
+    price_eur=to_eur(price,currency)
+    return {
+        'Ticker':ticker,'Tipo':a['kind'],'Mercado/moeda':currency,
+        'Técnica':a['tech_label'],'Score técnico':a['tech_score'],
+        'Fundamental/ETF':a['fund_label'],'Completude %':a['fund_complete'],
+        'Preço':price,'Preço aprox. EUR':price_eur,
+        'Stop':a['stop'],'Alvo técnico 2R':a['target'],
+        'Decisão':decision(a),'Data ref.':str(a['df'].index[-1].date()),
+        '_analysis':a
+    }
 
-    if st.button('Analisar ação', type='primary', key='analise'):
-        try:
-            add_watchlist(ticker)
-            raw5 = obter_dados(ticker, '5y', '1d')
-            d = preparar_indicadores(obter_dados(ticker, periodo, '1d')).dropna()
-            row = d.iloc[-1]
-            entrada, stop, alvo = risco_alvo(row)
-            score = score_tecnico(row)
-            risco_unit = max(entrada-stop,0.01)
-            risco_eur = capital*risco_pct/100
-            qtd = max(0, min(math.floor(risco_eur/risco_unit), math.floor(capital/entrada)))
-            movimento = (alvo/entrada-1)*100
-            tempo, taxa, amostras = estimar_tempo_alvo(raw5, movimento, horizonte)
+def backtest(ticker, score_min=75, max_days=20, cost_bps=10):
+    raw=price_data(ticker,'10y','1d')
+    d=indicators(raw).dropna().copy()
+    if len(d)<300: return pd.DataFrame()
+    trades=[]
+    i=1
+    while i < len(d)-max_days-1:
+        row=d.iloc[i-1]
+        sc,_,_=technical_score(row)
+        if sc < score_min:
+            i += 1; continue
+        entry=float(d['Open'].iloc[i])
+        atrv=float(row['ATR14'])
+        stop=entry-1.5*atrv
+        target=entry+2*(entry-stop)
+        exit_price=float(d['Close'].iloc[min(i+max_days,len(d)-1)])
+        exit_i=min(i+max_days,len(d)-1)
+        reason='Tempo'
+        for j in range(i, min(i+max_days+1,len(d))):
+            lo=float(d['Low'].iloc[j]); hi=float(d['High'].iloc[j])
+            if lo <= stop:
+                exit_price=stop; exit_i=j; reason='Stop'; break
+            if hi >= target:
+                exit_price=target; exit_i=j; reason='Alvo'; break
+        gross=(exit_price/entry-1)*100
+        net=gross - 2*(cost_bps/100.0)
+        trades.append({'Entrada':d.index[i],'Saída':d.index[exit_i],'Resultado %':net,'Motivo':reason,'Dias':exit_i-i+1})
+        i=exit_i+1
+    return pd.DataFrame(trades)
 
-            st.success(f'{ticker} foi adicionada à watchlist do Top 10.')
-            a,b,c,dcol = st.columns(4)
-            a.metric('Preço',f'{entrada:.2f} USD')
-            b.metric('Stop',f'{stop:.2f} USD')
-            c.metric('Alvo',f'{alvo:.2f} USD')
-            dcol.metric('Score técnico',f'{score}/100')
-            e,f,g = st.columns(3)
-            e.metric('Tempo médio até ao alvo', f'{tempo:.1f} dias de mercado' if tempo is not None else 'Sem histórico suficiente')
-            f.metric('Taxa histórica de atingir o alvo', f'{taxa:.1f}%' if taxa is not None else 'N/D')
-            g.metric('Quantidade teórica', str(qtd))
-            st.caption(f'Estimativa histórica nos últimos 5 anos; horizonte máximo {horizonte} dias de mercado; amostras: {amostras}.')
-            st.write(f"RSI **{row['RSI14']:.1f}** · Momentum 20d **{row['RET20']:.1f}%** · Momentum 60d **{row['RET60']:.1f}%** · ATR **{row['ATR14']/row['Close']*100:.1f}%**")
-            st.line_chart(d[['Close','EMA20','EMA50','EMA200']].tail(260))
-        except Exception as e:
-            st.error(str(e))
+def source_block(ticker, a):
+    url=f'https://finance.yahoo.com/quote/{ticker}'
+    st.caption(
+        f"Fonte de mercado/fundamentais: Yahoo Finance via yfinance · referência de preço: {a['df'].index[-1]} · "
+        f"recolha da app: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+    st.markdown(f'[Abrir fonte de dados de {ticker}]({url})')
 
-with tab2:
-    st.subheader('Minha carteira')
-    inicial = pd.DataFrame([
-        {'Ticker':'AAPL','Quantidade':1.0,'Preço médio compra':180.0,'Preço alvo':210.0},
-        {'Ticker':'MSFT','Quantidade':1.0,'Preço médio compra':400.0,'Preço alvo':450.0},
-    ])
-    carteira = st.data_editor(inicial, num_rows='dynamic', use_container_width=True, hide_index=True)
-    max_dias = st.selectbox('Horizonte da estimativa', [30,60,90,120,180], index=2, format_func=lambda x:f'{x} dias de mercado', key='portfolio_h')
-    if st.button('Avaliar carteira', type='primary', key='portfolio'):
-        rows=[]; total=0
-        for _,r in carteira.iterrows():
-            t=str(r.get('Ticker','')).upper().strip(); q=float(r.get('Quantidade',0) or 0); pm=float(r.get('Preço médio compra',0) or 0); pa=float(r.get('Preço alvo',0) or 0)
-            if not t or q<=0 or pm<=0 or pa<=0:
-                continue
-            add_watchlist(t)
-            try:
-                d=obter_dados(t,'5y','1d'); atual=float(d['Close'].iloc[-1]); valor=atual*q; total+=valor
-                dist=(pa/atual-1)*100
-                tempo,taxa,_=estimar_tempo_alvo(d,dist,max_dias) if dist>0 else (0.0,100.0,0)
-                rows.append({'Ticker':t,'Preço atual':atual,'Preço médio':pm,'Qtd':q,'Valor atual':valor,'P/L €':(atual-pm)*q,'P/L %':(atual/pm-1)*100,'Preço alvo':pa,'Distância alvo %':dist,'Ganho potencial até alvo':(pa-atual)*q,'Tempo médio até alvo':f'{tempo:.1f} dias de mercado' if tempo is not None else 'Sem histórico suficiente','Taxa histórica alvo %':taxa})
-            except Exception:
-                pass
-        if rows:
-            out=pd.DataFrame(rows); out['Peso %']=out['Valor atual']/total*100
-            st.dataframe(out,use_container_width=True,hide_index=True)
+TABS = st.tabs(['Plano de hoje','Analisar ativo','Minha carteira','Top 10','Desempenho','Metodologia'])
 
-with tab3:
-    st.subheader('Top 10 diário')
-    if st.session_state.watchlist:
-        st.info('Watchlist atual: ' + ', '.join(st.session_state.watchlist))
-    else:
-        st.info('Ainda não pesquisaste nenhuma ação nesta sessão.')
-    modo=st.radio('Ranking',['Hoje','Próxima sessão'],horizontal=True)
-    horizonte_top=st.selectbox('Horizonte para estimar tempo até ao alvo',[30,60,90,120,180],index=2,format_func=lambda x:f'{x} dias de mercado',key='top_h')
-    usar_watchlist=st.checkbox('Dar prioridade à watchlist',value=True)
-    base_universe=list(DEFAULT_UNIVERSE)
-    for t in st.session_state.watchlist:
-        if t not in base_universe:
-            base_universe.append(t)
-    universo_txt=st.text_area('Universo analisado', value=', '.join(base_universe), height=110)
-    if st.button('Gerar Top 10',type='primary',key='top10'):
-        tickers=[x.strip().upper() for x in universo_txt.replace('\n',',').split(',') if x.strip()]
-        tickers=list(dict.fromkeys(tickers))[:100]
-        with st.spinner('A analisar dados...'):
-            ranking=analisar_universo(tickers,'hoje' if modo=='Hoje' else 'proxima',horizonte_top)
-        if ranking.empty:
-            st.error('Não foi possível obter dados suficientes.')
+with TABS[0]:
+    st.subheader('Quero usar capital hoje')
+    st.write('A app só sugere entrada quando a análise técnica e a análise fundamental/qualidade do ETF são fortes. Caso contrário, devolve **AGUARDAR**.')
+    c1,c2,c3,c4=st.columns(4)
+    with c1: available=st.number_input('Capital disponível hoje (€)',min_value=0.0,value=400.0,step=50.0)
+    with c2: max_loss_trade=st.number_input('Perda máxima por operação (€)',min_value=0.0,value=0.0,step=1.0)
+    with c3: max_loss_day=st.number_input('Perda máxima no dia (€)',min_value=0.0,value=0.0,step=1.0)
+    with c4: markets_today=st.multiselect('Mercados',list(MARKETS.keys()),default=['EUA','Alemanha','Portugal'])
+    include_type=st.multiselect('Tipos', ['Ação','ETF'], default=['Ação','ETF'])
+    if st.button('Analisar oportunidades de hoje',type='primary'):
+        if max_loss_trade <= 0 or max_loss_day <= 0:
+            st.error('Para dimensionar uma posição pessoal, define primeiro a perda máxima por operação e por dia.')
+        elif not markets_today:
+            st.error('Escolhe pelo menos um mercado.')
         else:
-            ranking['Na watchlist']=ranking['Ticker'].isin(st.session_state.watchlist)
-            if usar_watchlist and st.session_state.watchlist:
-                ranking=ranking.sort_values(['Na watchlist','Score técnico'],ascending=[False,False])
-            top=ranking.head(10).copy()
-            cols=['Ticker','Na watchlist','Score técnico','Preço ref. USD','Preço aprox. EUR','Acima plafond €1000','Entrada ref.','Stop','Alvo','Tempo médio até alvo','Taxa histórica alvo %','Risco/Retorno','RSI','Momentum 20d %','Momentum 60d %','ATR %','Volume rel.','Liquidez média','Posição 52 semanas %','Data/hora referência']
-            if modo=='Hoje': cols += ['Variação última hora %','Volume rel. 1h']
-            st.dataframe(top[cols],use_container_width=True,hide_index=True)
-            st.caption('O score é técnico; não é probabilidade de lucro. Dados intradiários gratuitos podem ter atraso.')
-
-with tab4:
-    st.subheader('Desempenho da estratégia')
-    st.write('Este separador testa historicamente a mesma lógica de score, com entrada no dia seguinte ao sinal, alvo 2R, stop 1R e custos simulados.')
-
-    c1,c2,c3,c4 = st.columns(4)
-    with c1:
-        bt_ticker = st.text_input('Ticker para backtest','AAPL',key='bt_ticker').upper().strip()
-    with c2:
-        score_min = st.slider('Score mínimo',50,90,70,5)
-    with c3:
-        holding = st.selectbox('Máximo em posição',[5,10,20,30,60],index=2,format_func=lambda x:f'{x} dias de mercado')
-    with c4:
-        custo_bps = st.number_input('Custos totais simulados (bps)',min_value=0,max_value=100,value=10,step=5,help='Inclui aproximação de spread, slippage e comissões. 10 bps = 0,10%.')
-
-    if st.button('Executar backtest',type='primary',key='bt_run'):
-        try:
-            with st.spinner('A testar histórico...'):
-                trades=backtest_ticker(bt_ticker,score_min,holding,custo_bps)
-                resumo=resumo_backtest(trades)
-            if resumo is None:
-                st.warning('Sem operações suficientes com estes critérios.')
+            candidates=[]
+            with st.spinner('A analisar técnica, fundamentais e qualidade dos dados...'):
+                for t in universe_for(markets_today)[:100]:
+                    try:
+                        c=compact_candidate(t)
+                        if c['Tipo'] in include_type:
+                            candidates.append(c)
+                    except Exception:
+                        pass
+            if not candidates:
+                st.warning('Não foi possível obter dados suficientes.')
             else:
-                a,b,c,d = st.columns(4)
-                a.metric('Operações',str(resumo['trades']))
-                b.metric('Taxa de sucesso',f"{resumo['win_rate']:.1f}%")
-                c.metric('Expectativa por operação',f"{resumo['expectancy']:.2f}%")
-                d.metric('Drawdown máximo',f"{resumo['max_dd']:.1f}%")
+                df=pd.DataFrame([{k:v for k,v in x.items() if k!='_analysis'} for x in candidates])
+                valid=df[(df['Decisão']=='CANDIDATO A ENTRADA') & (df['Completude %']>=60)].copy()
+                valid=valid.sort_values(['Score técnico','Completude %'],ascending=False)
+                st.write(f'Regime geral de referência (SPY): **{market_regime()}**')
+                if valid.empty:
+                    st.warning('AGUARDAR — nenhum ativo analisado passou simultaneamente os filtros técnico e fundamental/ETF definidos.')
+                else:
+                    best=valid.iloc[0]
+                    a=next(x['_analysis'] for x in candidates if x['Ticker']==best['Ticker'])
+                    currency=str(a['info'].get('currency') or 'EUR').upper()
+                    entry_eur=to_eur(a['entry'],currency)
+                    stop_eur=to_eur(a['stop'],currency)
+                    if entry_eur is None or stop_eur is None:
+                        st.warning('Existe candidato, mas não há conversão cambial suficiente para dimensionar em euros.')
+                    else:
+                        risk_per_unit=max(entry_eur-stop_eur,0.01)
+                        risk_budget=min(max_loss_trade,max_loss_day)
+                        qty_risk=math.floor(risk_budget/risk_per_unit)
+                        qty_capital=math.floor(available/entry_eur)
+                        qty=max(0,min(qty_risk,qty_capital))
+                        if qty < 1:
+                            st.warning(f"AGUARDAR — {best['Ticker']} passou os filtros, mas uma unidade inteira não cabe simultaneamente no capital e no risco definidos.")
+                        else:
+                            invested=qty*entry_eur
+                            potential_loss=qty*risk_per_unit
+                            target_eur=to_eur(a['target'],currency)
+                            potential_gain=(target_eur-entry_eur)*qty if target_eur is not None else None
+                            st.success(f"CANDIDATO: {best['Ticker']} ({best['Tipo']})")
+                            x1,x2,x3,x4=st.columns(4)
+                            x1.metric('Valor a usar',f'€{invested:.2f}')
+                            x2.metric('Quantidade',str(qty))
+                            x3.metric('Perda planeada',f'€{potential_loss:.2f}')
+                            x4.metric('Ganho no alvo 2R',f'€{potential_gain:.2f}' if potential_gain is not None else 'N/D')
+                            st.write(f"Entrada ref.: **{a['entry']:.2f} {currency}** · Stop: **{a['stop']:.2f}** · Alvo técnico 2R: **{a['target']:.2f}**")
+                            st.write(f"Técnica: **{a['tech_label']} ({a['tech_score']}/100)** · Fundamental/ETF: **{a['fund_label']}** · Completude: **{a['fund_complete']}%**")
+                            if not a['scenarios'].empty:
+                                st.markdown('**Cenários históricos comparáveis — não são previsões:**')
+                                st.dataframe(a['scenarios'],use_container_width=True,hide_index=True)
+                            source_block(best['Ticker'],a)
+                st.markdown('**Candidatos analisados**')
+                st.dataframe(df.drop(columns=[],errors='ignore').sort_values(['Decisão','Score técnico'],ascending=[True,False]).head(25),use_container_width=True,hide_index=True)
 
-                e,f,g,h = st.columns(4)
-                e.metric('Ganho médio',f"{resumo['avg_win']:.2f}%")
-                f.metric('Perda média',f"{resumo['avg_loss']:.2f}%")
-                g.metric('Tempo médio em posição',f"{resumo['avg_days']:.1f} dias de mercado")
-                h.metric('Retorno acumulado simulado',f"{resumo['net_total']:.1f}%")
-
-                st.subheader('Curva de capital simulada')
-                curve=(1+trades['Retorno líquido %']/100).cumprod()
-                st.line_chart(pd.DataFrame({'Capital relativo':curve.values},index=trades['Data saída']))
-
-                st.subheader('Desempenho por regime de mercado')
-                regime_tbl=trades.groupby('Regime')['Retorno líquido %'].agg(['count','mean']).reset_index()
-                regime_tbl.columns=['Regime','Operações','Retorno médio %']
-                st.dataframe(regime_tbl,use_container_width=True,hide_index=True)
-
-                st.subheader('Últimas operações do backtest')
-                st.dataframe(trades.tail(50),use_container_width=True,hide_index=True)
-
-                csv=trades.to_csv(index=False).encode('utf-8')
-                st.download_button('Descarregar operações do backtest',csv,file_name=f'backtest_{bt_ticker}.csv',mime='text/csv')
-
-                st.caption('Backtest com dados diários e regras simplificadas. Não inclui impostos nem garante resultados futuros. Quando alvo e stop são tocados no mesmo dia, assume-se o stop primeiro para evitar otimismo excessivo.')
+with TABS[1]:
+    st.subheader('Analisar ação ou ETF')
+    t=st.text_input('Ticker',value='AAPL',key='single').upper().strip()
+    if st.button('Analisar',type='primary',key='single_btn'):
+        try:
+            add_watchlist(t)
+            a=analyze_asset(t)
+            dec=decision(a)
+            st.success(f'{dec} · {a["kind"]}') if dec!='AGUARDAR' else st.warning(f'{dec} · {a["kind"]}')
+            m1,m2,m3,m4=st.columns(4)
+            m1.metric('Preço',f'{a["entry"]:.2f}')
+            m2.metric('Stop técnico',f'{a["stop"]:.2f}')
+            m3.metric('Alvo técnico 2R',f'{a["target"]:.2f}')
+            m4.metric('Score técnico',f'{a["tech_score"]}/100')
+            st.write(f"Técnica: **{a['tech_label']}** · Fundamental/qualidade ETF: **{a['fund_label']}** · Dados fundamentais disponíveis: **{a['fund_complete']}%**")
+            st.markdown('**Critérios técnicos**')
+            st.dataframe(pd.DataFrame([{'Critério':k,'Cumpre':'Sim' if v else 'Não'} for k,v in a['tech_tests'].items()]),hide_index=True,use_container_width=True)
+            st.markdown('**Critérios fundamentais / ETF**')
+            st.dataframe(a['fund_table'],hide_index=True,use_container_width=True)
+            if not a['scenarios'].empty:
+                st.markdown('**Cenários históricos comparáveis (5/10/15/30 dias)**')
+                st.dataframe(a['scenarios'],hide_index=True,use_container_width=True)
+                st.caption('O nível mediano histórico é calculado a partir de situações técnicas passadas semelhantes. Não é um preço-alvo previsto.')
+            else:
+                st.info('Não existem observações históricas comparáveis suficientes para gerar cenários 5/10/15/30 dias.')
+            st.line_chart(a['df'][['Close','EMA20','EMA50','EMA200']].tail(260))
+            source_block(t,a)
+            st.info('A ação foi adicionada à watchlist desta sessão.')
         except Exception as e:
             st.error(str(e))
 
-st.divider()
-st.caption('Protótipo de análise. Não envia ordens nem garante que um alvo seja atingido.')
+with TABS[2]:
+    st.subheader('Minha carteira')
+    st.caption('Introduz preço médio e preço alvo definidos por ti. A app calcula dados atuais e cenários históricos sem inventar um alvo.')
+    initial=pd.DataFrame([{'Ticker':'AAPL','Quantidade':1.0,'Preço médio':180.0,'Preço alvo':210.0}])
+    portfolio=st.data_editor(initial,num_rows='dynamic',hide_index=True,use_container_width=True)
+    if st.button('Avaliar carteira',type='primary'):
+        rows=[]
+        for _,r in portfolio.iterrows():
+            t=str(r.get('Ticker','')).upper().strip(); q=float(r.get('Quantidade',0) or 0); pm=float(r.get('Preço médio',0) or 0); pa=float(r.get('Preço alvo',0) or 0)
+            if not t or q<=0 or pm<=0 or pa<=0: continue
+            try:
+                add_watchlist(t); a=analyze_asset(t)
+                price=float(a['row']['Close']); cur=str(a['info'].get('currency') or 'EUR').upper()
+                rows.append({'Ticker':t,'Tipo':a['kind'],'Moeda':cur,'Preço atual':price,'Quantidade':q,'Preço médio':pm,'P/L %':(price/pm-1)*100,'Preço alvo':pa,'Distância ao alvo %':(pa/price-1)*100,'Técnica':a['tech_label'],'Fundamental/ETF':a['fund_label'],'Decisão':decision(a)})
+            except Exception as e:
+                rows.append({'Ticker':t,'Erro':str(e)})
+        if rows: st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
+
+with TABS[3]:
+    st.subheader('Top 10 por mercado ou global')
+    markets=st.multiselect('Mercados a comparar',list(MARKETS.keys()),default=['EUA','Alemanha','Portugal'],key='topmarkets')
+    if st.session_state.watchlist:
+        st.info('Watchlist desta sessão: '+', '.join(st.session_state.watchlist))
+    if st.button('Gerar Top 10',type='primary'):
+        rows=[]
+        with st.spinner('A analisar...'):
+            for t in universe_for(markets)[:120]:
+                try:
+                    c=compact_candidate(t)
+                    c.pop('_analysis',None)
+                    c['Na watchlist']='Sim' if t in st.session_state.watchlist else 'Não'
+                    rows.append(c)
+                except Exception:
+                    pass
+        if rows:
+            df=pd.DataFrame(rows).sort_values(['Score técnico','Completude %'],ascending=False)
+            st.dataframe(df.head(10),use_container_width=True,hide_index=True)
+            st.caption('A ordenação usa apenas métricas calculadas. “CANDIDATO A ENTRADA” exige técnica forte + fundamental/ETF forte + dados suficientes.')
+        else: st.warning('Sem dados suficientes.')
+
+with TABS[4]:
+    st.subheader('Desempenho histórico da regra técnica')
+    bt=st.text_input('Ticker para backtest',value='AAPL').upper().strip()
+    b1,b2,b3=st.columns(3)
+    with b1: score_min=st.slider('Score técnico mínimo',50,100,75,5)
+    with b2: max_days=st.slider('Máximo dias em posição',5,60,20,5)
+    with b3: costs=st.number_input('Custos ida+volta por lado (bps)',min_value=0,value=10,step=1)
+    if st.button('Executar backtest',type='primary'):
+        try:
+            tr=backtest(bt,score_min,max_days,costs)
+            if tr.empty: st.warning('Sem operações suficientes.')
+            else:
+                win=(tr['Resultado %']>0).mean()*100
+                avgwin=tr.loc[tr['Resultado %']>0,'Resultado %'].mean()
+                avgloss=tr.loc[tr['Resultado %']<=0,'Resultado %'].mean()
+                expectancy=tr['Resultado %'].mean()
+                equity=(1+tr['Resultado %']/100).cumprod()
+                dd=(equity/equity.cummax()-1)*100
+                c1,c2,c3,c4=st.columns(4)
+                c1.metric('Operações',len(tr)); c2.metric('Taxa sucesso',f'{win:.1f}%'); c3.metric('Expectativa média',f'{expectancy:.2f}%'); c4.metric('Drawdown máx.',f'{dd.min():.2f}%')
+                st.write(f'Ganho médio: **{avgwin:.2f}%** · Perda média: **{avgloss:.2f}%** · Tempo médio: **{tr["Dias"].mean():.1f} dias de mercado**')
+                st.line_chart(pd.DataFrame({'Capital relativo':equity.values},index=tr['Saída']))
+                st.dataframe(tr.tail(100),hide_index=True,use_container_width=True)
+                st.caption('Backtest técnico, não inclui análise fundamental histórica ponto-a-ponto. Custos são os valores introduzidos acima.')
+        except Exception as e: st.error(str(e))
+
+with TABS[5]:
+    st.subheader('Metodologia e regras de integridade dos dados')
+    st.markdown('''
+- **Nenhum número é preenchido por suposição.** Se o fornecedor não disponibilizar um campo, aparece `N/D` ou “dados insuficientes”.
+- **Técnica e fundamental são separadas.** Uma entrada só passa a regra quando ambos os blocos são fortes e a completude fundamental/ETF é suficiente.
+- **Cenários de 5/10/15/30 dias** usam retornos observados em estados técnicos históricos semelhantes. São estatísticas condicionais, não previsões.
+- **Preço, stop e alvo 2R** são calculados a partir do último fecho e ATR; a fórmula é reproduzível e visível.
+- **Dimensionamento pessoal** só é feito quando o utilizador introduz capital, perda máxima por operação e perda máxima diária.
+- **Ações acima do plafond não são ocultadas.** Podem aparecer no ranking; a app apenas impede dimensionamento incompatível com o capital/risco introduzido.
+- **Mercados suportados:** EUA, Alemanha, Portugal, França, Países Baixos, Espanha, Itália, Reino Unido e Suíça, conforme disponibilidade do fornecedor.
+- **Fonte atual:** Yahoo Finance via `yfinance`. Para decisões reais, confirma preço, spread, sessão e documentos da empresa/ETF na corretora e nas relações com investidores/regulador.
+''')
