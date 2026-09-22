@@ -1,13 +1,25 @@
-# Robot Trading Web v4
+# Robot Trading Web v5
 
-Novidades:
-- tempo médio histórico até ao alvo na análise individual;
-- taxa histórica de atingir o alvo;
-- horizonte configurável em dias de mercado;
-- qualquer ação pesquisada entra automaticamente na watchlist;
-- ações da carteira também entram na watchlist;
-- Top 10 pode dar prioridade à watchlist;
-- Top 10 mostra tempo médio até ao alvo e taxa histórica;
-- ações acima do plafond continuam visíveis.
+Novidades principais:
+- separador **Desempenho** com backtest histórico;
+- taxa de sucesso;
+- ganho médio e perda média;
+- expectativa média por operação;
+- drawdown máximo;
+- tempo médio em posição;
+- retorno acumulado simulado;
+- custos simulados em basis points (bps);
+- desempenho por regime de mercado;
+- curva de capital;
+- exportação das operações do backtest para CSV;
+- mantém análise individual, carteira, watchlist e Top 10 diário.
 
-Nota: a watchlist é mantida durante a sessão atual do Streamlit. Para persistência permanente, é necessário guardar os dados externamente.
+## Atualizar no Streamlit
+Substitui no GitHub:
+- `app.py`
+- `requirements.txt`
+
+Depois do commit, o Streamlit deverá fazer redeploy automaticamente.
+
+## Nota
+O backtest usa regras simplificadas e dados diários. Não inclui impostos e não garante resultados futuros.
