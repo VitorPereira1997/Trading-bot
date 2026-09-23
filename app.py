@@ -145,6 +145,10 @@ def resolve_instrument(ticker, market_hint=None):
 
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = []
+if 'portfolio_input' not in st.session_state:
+    st.session_state.portfolio_input = []
+if 'decision_history' not in st.session_state:
+    st.session_state.decision_history = []
 
 def add_watchlist(ticker):
     t = str(ticker).upper().strip()
@@ -664,7 +668,297 @@ def source_block(ticker, a):
         st.info(f"Ticker XTB: {xtb} → ticker técnico usado apenas para dados: {source}. A identidade da posição continua a ser {xtb}.")
     st.markdown(f'[Abrir fonte técnica de {source}]({url})')
 
-TABS = st.tabs(['Plano de hoje','Analisar ativo','Setores','Minha carteira','Top 10','Desempenho','Metodologia'])
+
+
+def annualized_volatility(df, days=252):
+    s=df['Close'].dropna().pct_change().dropna().tail(days)
+    if len(s) < 60:
+        return None
+    return float(s.std(ddof=1)*np.sqrt(252)*100)
+
+def max_drawdown_pct(df, days=756):
+    s=df['Close'].dropna().tail(days)
+    if len(s) < 60:
+        return None
+    peak=s.cummax()
+    dd=(s/peak-1)*100
+    return float(dd.min())
+
+def analyst_consensus(info, current_price):
+    mean=_num(info,'targetMeanPrice')
+    low=_num(info,'targetLowPrice')
+    high=_num(info,'targetHighPrice')
+    n=_num(info,'numberOfAnalystOpinions')
+    upside=(mean/current_price-1)*100 if mean is not None and current_price>0 else None
+    return {
+        'Preço alvo médio consenso':mean,
+        'Preço alvo baixo consenso':low,
+        'Preço alvo alto consenso':high,
+        'Nº analistas':int(n) if n is not None else None,
+        'Potencial consenso %':upside,
+    }
+
+def portfolio_exposures():
+    rows=st.session_state.get('portfolio_rows',[])
+    if not rows:
+        return {},{},0.0
+    df=pd.DataFrame(rows)
+    if 'Valor atual EUR' not in df.columns:
+        return {},{},0.0
+    vals=pd.to_numeric(df['Valor atual EUR'],errors='coerce')
+    total=float(vals.sum()) if vals.notna().any() else 0.0
+    if total<=0:
+        return {},{},0.0
+    asset={}
+    sector={}
+    for _,r in df.iterrows():
+        v=float(r.get('Valor atual EUR') or 0)
+        if v<=0: continue
+        t=str(r.get('Ticker XTB') or '')
+        s=str(r.get('Setor') or 'N/D')
+        asset[t]=asset.get(t,0.0)+v/total*100
+        sector[s]=sector.get(s,0.0)+v/total*100
+    return asset,sector,total
+
+def diversification_adjustment(ticker, sector, asset_weights, sector_weights):
+    adj=0.0
+    reasons=[]
+    aw=float(asset_weights.get(ticker,0.0))
+    sw=float(sector_weights.get(sector,0.0))
+    if aw >= 25:
+        adj -= 18; reasons.append(f'posição já representa {aw:.1f}% da carteira')
+    elif aw >= 15:
+        adj -= 10; reasons.append(f'posição já representa {aw:.1f}% da carteira')
+    elif aw >= 8:
+        adj -= 5; reasons.append(f'posição já representa {aw:.1f}% da carteira')
+    if sector != 'N/D':
+        if sw >= 40:
+            adj -= 12; reasons.append(f'setor já representa {sw:.1f}% da carteira')
+        elif sw >= 25:
+            adj -= 6; reasons.append(f'setor já representa {sw:.1f}% da carteira')
+        elif sw < 10:
+            adj += 5; reasons.append('setor pouco representado na carteira')
+    return adj, reasons
+
+def wealth_candidate_row(ticker, asset_weights=None, sector_weights=None, max_tolerated_drawdown=30):
+    asset_weights=asset_weights or {}
+    sector_weights=sector_weights or {}
+    base=sector_asset_row(ticker)
+    a=analyze_asset(ticker)
+    d=a['df']; row=a['row']; info=a['info']
+    vol=annualized_volatility(d,252)
+    mdd1=max_drawdown_pct(d,252)
+    mdd3=max_drawdown_pct(d,756)
+    current=float(row['Close'])
+    cur=a['currency']
+    price_eur=to_eur(current,cur)
+    cons=analyst_consensus(info,current) if a['kind']=='Ação' else {
+        'Preço alvo médio consenso':None,'Preço alvo baixo consenso':None,'Preço alvo alto consenso':None,
+        'Nº analistas':None,'Potencial consenso %':None}
+    sector=base['Setor']
+    adj,reasons=diversification_adjustment(a['xtb_ticker'],sector,asset_weights,sector_weights)
+    risk_penalty=0.0
+    risk_note=''
+    if mdd3 is not None and abs(mdd3) > float(max_tolerated_drawdown):
+        risk_penalty=-12.0
+        risk_note=f'drawdown histórico 3 anos ({mdd3:.1f}%) excede a tolerância indicada'
+    return {
+        **base,
+        'Preço aprox. EUR':price_eur,
+        'Volatilidade anualizada 1A %':vol,
+        'Drawdown máx. 1A %':mdd1,
+        'Drawdown máx. 3A %':mdd3,
+        **cons,
+        'Ajuste diversificação':adj,
+        'Penalização risco':risk_penalty,
+        'Motivos ajuste':'; '.join(reasons+[risk_note] if risk_note else reasons) or 'Sem ajuste',
+    }
+
+def add_wealth_scores(df):
+    if df.empty:
+        return df
+    out=add_sector_relative_scores(df.copy())
+    out['Score próximo euro']=np.nan
+    out['Decisão longo prazo']='AGUARDAR'
+    for i in out.index:
+        longv=out.at[i,'Score longo prazo']
+        if pd.isna(longv):
+            continue
+        score=float(longv)+float(out.at[i,'Ajuste diversificação'] or 0)+float(out.at[i,'Penalização risco'] or 0)
+        score=max(0.0,min(100.0,score))
+        out.at[i,'Score próximo euro']=round(score,1)
+        comp=float(out.at[i,'Completude fundamental %']) if pd.notna(out.at[i,'Completude fundamental %']) else 0.0
+        fund=out.at[i,'Score fundamental']
+        if score >= 75 and comp >= 60 and pd.notna(fund) and float(fund) >= 65:
+            out.at[i,'Decisão longo prazo']='CANDIDATO A NOVO CAPITAL'
+        elif score >= 65:
+            out.at[i,'Decisão longo prazo']='OBSERVAR / AGUARDAR MELHOR ENTRADA'
+        else:
+            out.at[i,'Decisão longo prazo']='NÃO PRIORIZAR AGORA'
+    return out
+
+
+def _now_utc_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+def _safe_float(v):
+    try:
+        x=float(v)
+        return x if np.isfinite(x) else None
+    except Exception:
+        return None
+
+def log_decision(a, action, suggested_qty=None, suggested_invested_eur=None, actual_entry=None, actual_qty=None, objective=None, note=None):
+    price=float(a['entry'])
+    currency=a['currency'] if a['currency']!='N/D' else 'EUR'
+    decision_price=float(actual_entry) if actual_entry is not None and actual_entry>0 else price
+    price_eur=to_eur(decision_price,currency)
+    row={
+        'Data decisão UTC':_now_utc_iso(),
+        'Ticker XTB':a['xtb_ticker'],
+        'Ticker técnico':a['source_ticker'],
+        'Empresa':a['company'],
+        'Mercado':a['market'],
+        'Tipo':a['kind'],
+        'Moeda':currency,
+        'Decisão utilizador':str(action),
+        'Preço na decisão':decision_price,
+        'Preço na decisão EUR':price_eur,
+        'Quantidade sugerida':_safe_float(suggested_qty),
+        'Capital sugerido EUR':_safe_float(suggested_invested_eur),
+        'Quantidade efetiva':_safe_float(actual_qty),
+        'Stop no momento':float(a['stop']),
+        'Alvo técnico no momento':float(a['target']),
+        'Score técnico no momento':float(a['tech_score']),
+        'Técnica no momento':a['tech_label'],
+        'Fundamental/ETF no momento':a['fund_label'],
+        'Completude fundamental %':float(a['fund_complete']),
+        'Objetivo':objective or '',
+        'Nota':note or '',
+    }
+    st.session_state.decision_history.append(row)
+    return row
+
+def add_or_merge_portfolio_position(ticker, qty, entry_price, objective='Longo prazo', personal_target=0.0, origin='Oportunidade aceite', entry_date=None, thesis=''):
+    t=str(ticker).upper().strip()
+    q=float(qty)
+    ep=float(entry_price)
+    if not t or q<=0 or ep<=0:
+        return
+    rows=list(st.session_state.portfolio_input)
+    found=False
+    for r in rows:
+        if str(r.get('Ticker XTB','')).upper().strip()==t and str(r.get('Objetivo','Longo prazo'))==str(objective):
+            oldq=float(r.get('Quantidade',0) or 0)
+            oldp=float(r.get('Preço médio',0) or 0)
+            newq=oldq+q
+            if newq>0:
+                r['Preço médio']=(oldq*oldp+q*ep)/newq if oldq>0 else ep
+                r['Quantidade']=newq
+            if personal_target and float(personal_target)>0:
+                r['Preço alvo pessoal']=float(personal_target)
+            if entry_date:
+                r['Data entrada']=str(entry_date)
+            if thesis:
+                r['Tese/nota']=str(thesis)
+            r['Origem']=origin
+            found=True
+            break
+    if not found:
+        rows.append({
+            'Ticker XTB':t,'Quantidade':q,'Preço médio':ep,
+            'Preço alvo pessoal':float(personal_target or 0),
+            'Data entrada':str(entry_date) if entry_date else datetime.now().date().isoformat(),
+            'Objetivo':objective,'Origem':origin,'Tese/nota':str(thesis or ''),
+        })
+    st.session_state.portfolio_input=rows
+
+def portfolio_rule_action(a, personal_target=0.0, weight_pct=None):
+    current=float(a['row']['Close'])
+    target=_safe_float(personal_target) or 0.0
+    if target>0 and current>=target:
+        return 'ALVO PESSOAL ATINGIDO — REVER', f'Preço atual atingiu/superou o alvo pessoal ({target:.2f}).'
+    if a['fund_complete'] < 40:
+        return 'REVER — DADOS INSUFICIENTES', 'Cobertura fundamental/ETF insuficiente para uma decisão forte.'
+    if a['fund_label']=='Fraco' and a['tech_label']=='Fraco':
+        return 'VENDER / REDUZIR — REGRA', 'Fundamentais/qualidade e técnica estão simultaneamente fracos pelas regras atuais.'
+    if a['fund_label']=='Forte' and a['tech_label']=='Forte':
+        if weight_pct is not None and weight_pct>=25:
+            return 'MANTER / NÃO REFORÇAR', f'Qualidade forte, mas a posição já pesa cerca de {weight_pct:.1f}% da carteira.'
+        return 'MANTER / CANDIDATO A REFORÇO', 'Técnica e fundamentais/qualidade estão fortes pelas regras atuais.'
+    if a['fund_label']=='Forte':
+        return 'MANTER / AGUARDAR', 'Fundamentais/qualidade fortes, mas a técnica ainda não confirma reforço.'
+    if a['tech_label']=='Fraco':
+        return 'AGUARDAR / NÃO REFORÇAR', 'Técnica fraca e fundamentais/qualidade não são fortes.'
+    return 'MANTER / REVER', 'Condições mistas; não existe sinal forte para reforçar ou reduzir.'
+
+def decision_path_status(a, hist_row):
+    try:
+        ts=pd.to_datetime(hist_row.get('Data decisão UTC'),utc=True,errors='coerce')
+        if pd.isna(ts):
+            return 'N/D'
+        start_date=ts.tz_convert(None).date()
+        raw=a['raw'].copy()
+        idx=pd.to_datetime(raw.index)
+        if getattr(idx,'tz',None) is not None:
+            idx=idx.tz_localize(None)
+        mask=idx.date>=start_date
+        future=raw.loc[mask]
+        if future.empty:
+            return 'Sem dados posteriores'
+        target=_safe_float(hist_row.get('Alvo técnico no momento'))
+        stop=_safe_float(hist_row.get('Stop no momento'))
+        target_date=None; stop_date=None
+        if target is not None:
+            hit=future[future['High']>=target]
+            if not hit.empty: target_date=pd.to_datetime(hit.index[0]).date()
+        if stop is not None:
+            hit=future[future['Low']<=stop]
+            if not hit.empty: stop_date=pd.to_datetime(hit.index[0]).date()
+        if target_date and stop_date:
+            if target_date==stop_date:
+                return f'Alvo e stop tocados no mesmo dia ({target_date}); ordem intradiária desconhecida'
+            return f'Alvo tocado primeiro em {target_date}' if target_date<stop_date else f'Stop tocado primeiro em {stop_date}'
+        if target_date: return f'Alvo tocado em {target_date}'
+        if stop_date: return f'Stop tocado em {stop_date}'
+        return 'Nem alvo nem stop tocados'
+    except Exception:
+        return 'N/D'
+
+def revalue_decision_history():
+    out=[]
+    for h in st.session_state.decision_history:
+        row=dict(h)
+        try:
+            a=analyze_asset(h['Ticker XTB'])
+            current=float(a['row']['Close'])
+            old=float(h['Preço na decisão'])
+            change=(current/old-1)*100 if old>0 else None
+            cur=a['currency'] if a['currency']!='N/D' else h.get('Moeda','EUR')
+            current_eur=to_eur(current,cur)
+            old_eur=_safe_float(h.get('Preço na decisão EUR'))
+            qty=_safe_float(h.get('Quantidade efetiva')) or _safe_float(h.get('Quantidade sugerida'))
+            hypothetical=None
+            if qty and current_eur is not None and old_eur is not None:
+                hypothetical=(current_eur-old_eur)*qty
+            row.update({
+                'Preço atual':current,
+                'Preço atual EUR':current_eur,
+                'Variação desde decisão %':change,
+                'Diferença € na quantidade registada':hypothetical,
+                'Técnica atual':a['tech_label'],
+                'Fundamental/ETF atual':a['fund_label'],
+                'Regra atual':decision(a),
+                'Percurso desde decisão':decision_path_status(a,h),
+                'Data preço atual':str(a['df'].index[-1]),
+            })
+        except Exception as e:
+            row['Erro atualização']=str(e)
+        out.append(row)
+    return pd.DataFrame(out)
+
+
+TABS = st.tabs(['Plano de hoje','Analisar ativo','Setores','Minha carteira','Decisões','Top 10','Desempenho','Metodologia','Construir património'])
 
 with TABS[0]:
     st.subheader('Quero usar capital hoje')
@@ -732,6 +1026,33 @@ with TABS[0]:
                                 st.markdown('**Cenários históricos comparáveis — não são previsões:**')
                                 st.dataframe(a['scenarios'],use_container_width=True,hide_index=True)
                             source_block(best['Ticker XTB'],a)
+
+                            st.markdown('### A tua decisão sobre esta oportunidade')
+                            st.caption('Aceitar não envia nenhuma ordem. Apenas regista a tua decisão e adiciona a posição à carteira da app com os valores que confirmares.')
+                            d1,d2,d3,d4=st.columns(4)
+                            with d1:
+                                actual_entry=st.number_input('Preço efetivo de entrada',min_value=0.0,value=float(a['entry']),step=0.01,key=f"accept_price_{a['xtb_ticker']}")
+                            with d2:
+                                actual_qty=st.number_input('Quantidade efetiva',min_value=0.0,value=float(qty),step=1.0,key=f"accept_qty_{a['xtb_ticker']}")
+                            with d3:
+                                objective=st.selectbox('Objetivo',['Curto prazo','Longo prazo'],index=0,key=f"accept_obj_{a['xtb_ticker']}")
+                            with d4:
+                                personal_target=st.number_input('Alvo pessoal (opcional)',min_value=0.0,value=0.0,step=0.01,key=f"accept_target_{a['xtb_ticker']}")
+                            note=st.text_input('Nota/tese da decisão (opcional)',key=f"decision_note_{a['xtb_ticker']}")
+                            bacc,brej=st.columns(2)
+                            with bacc:
+                                if st.button('✅ Aceitar e adicionar à carteira',use_container_width=True,key=f"accept_{a['xtb_ticker']}"):
+                                    if actual_entry<=0 or actual_qty<=0:
+                                        st.error('Confirma um preço e uma quantidade superiores a zero.')
+                                    else:
+                                        log_decision(a,'ACEITE',qty,invested,actual_entry,actual_qty,objective,note)
+                                        add_or_merge_portfolio_position(a['xtb_ticker'],actual_qty,actual_entry,objective,personal_target,'Oportunidade aceite')
+                                        st.success(f"Oportunidade aceite e {a['xtb_ticker']} adicionada à carteira da app.")
+                            with brej:
+                                if st.button('❌ Rejeitar e acompanhar',use_container_width=True,key=f"reject_{a['xtb_ticker']}"):
+                                    log_decision(a,'REJEITADA',qty,invested,None,None,objective,note)
+                                    st.info(f"Oportunidade rejeitada a {a['entry']:.2f} {currency}. Ficará no histórico para comparar com o preço futuro.")
+
                 st.markdown('**Candidatos analisados**')
                 st.dataframe(df.drop(columns=[],errors='ignore').sort_values(['Decisão','Score técnico'],ascending=[True,False]).head(25),use_container_width=True,hide_index=True)
 
@@ -859,27 +1180,203 @@ with TABS[2]:
         st.info('Gera a análise para ver os setores e os rankings de curto e longo prazo.')
 
 with TABS[3]:
-    st.subheader('Minha carteira')
-    st.caption('Introduz preço médio e preço alvo definidos por ti. A app calcula dados atuais e cenários históricos sem inventar um alvo.')
-    initial=pd.DataFrame([{'Ticker XTB':'AAPL.US','Quantidade':1.0,'Preço médio':180.0,'Preço alvo':210.0}])
+    st.subheader('Minha carteira — gestão contínua')
+    st.write('As posições aceites no **Plano de hoje** aparecem aqui automaticamente. Também podes adicionar as posições que já possuis e a app passa a analisá-las com as mesmas regras.')
+
+    st.markdown('### Adicionar posição existente')
+    st.caption('Usa o ticker XTB exato do instrumento que tens. A app valida o instrumento e não troca silenciosamente de bolsa ou moeda.')
+    with st.form('manual_position_form', clear_on_submit=False):
+        m1,m2,m3,m4=st.columns(4)
+        with m1:
+            manual_ticker=st.text_input('Ticker XTB',value='',placeholder='Ex.: ASML.NL, META.US, FB2A.DE')
+        with m2:
+            manual_qty=st.number_input('Quantidade',min_value=0.0,value=0.0,step=0.01)
+        with m3:
+            manual_price=st.number_input('Preço médio de compra',min_value=0.0,value=0.0,step=0.01)
+        with m4:
+            manual_date=st.date_input('Data de entrada',value=datetime.now().date())
+        n1,n2,n3=st.columns(3)
+        with n1:
+            manual_objective=st.selectbox('Objetivo',['Longo prazo','Curto prazo'],index=0)
+        with n2:
+            manual_target=st.number_input('Preço alvo pessoal (opcional)',min_value=0.0,value=0.0,step=0.01)
+        with n3:
+            manual_origin=st.selectbox('Origem',['Posição existente adicionada por mim','Oportunidade externa','Outra'],index=0)
+        manual_thesis=st.text_area('Tese/nota original (opcional)',placeholder='Porque compraste, o que esperavas da empresa/ETF, ou qualquer contexto que queiras preservar.')
+        manual_submit=st.form_submit_button('Adicionar à minha carteira',type='primary',use_container_width=True)
+
+    if manual_submit:
+        mt=str(manual_ticker).upper().strip()
+        if not mt or manual_qty<=0 or manual_price<=0:
+            st.error('Indica ticker XTB, quantidade e preço médio de compra válidos.')
+        else:
+            try:
+                a_manual=analyze_asset(mt)
+                add_watchlist(a_manual['xtb_ticker'])
+                add_or_merge_portfolio_position(
+                    a_manual['xtb_ticker'],manual_qty,manual_price,manual_objective,manual_target,manual_origin,manual_date,manual_thesis
+                )
+                st.success(
+                    f"{a_manual['xtb_ticker']} adicionada à carteira. A app identificou {a_manual['company']} · "
+                    f"{a_manual['market']} · {a_manual['currency']}."
+                )
+                st.info('A partir de agora, usa **Atualizar e analisar carteira agora** para obter a ação da regra, fundamentos, técnica, alvo e estimativas históricas desta posição.')
+            except Exception as e:
+                st.error(f'Não foi possível validar/adicionar esta posição: {e}')
+
+    up=st.file_uploader('Carregar carteira CSV (opcional)',type=['csv'],key='portfolio_upload')
+    if up is not None and st.button('Importar carteira CSV',key='portfolio_import'):
+        try:
+            imp=pd.read_csv(up)
+            required={'Ticker XTB','Quantidade','Preço médio'}
+            if not required.issubset(set(imp.columns)):
+                st.error('O CSV precisa de ter pelo menos: Ticker XTB, Quantidade e Preço médio.')
+            else:
+                st.session_state.portfolio_input=imp.to_dict('records')
+                st.success('Carteira importada.')
+        except Exception as e:
+            st.error(f'Não foi possível importar: {e}')
+
+    if st.session_state.portfolio_input:
+        base_port=pd.DataFrame(st.session_state.portfolio_input)
+    else:
+        base_port=pd.DataFrame(columns=['Ticker XTB','Quantidade','Preço médio','Preço alvo pessoal','Data entrada','Objetivo','Origem','Tese/nota'])
+
     portfolio=st.data_editor(
-        initial,num_rows='dynamic',hide_index=True,use_container_width=True,
-        column_config={'Ticker XTB': st.column_config.TextColumn('Ticker XTB', help='Ex.: AAPL.US, ASML.NL, FB2A.DE, EDP.PT')}
+        base_port,num_rows='dynamic',hide_index=True,use_container_width=True,key='portfolio_editor_v11',
+        column_config={
+            'Ticker XTB':st.column_config.TextColumn('Ticker XTB',help='Ex.: AAPL.US, ASML.NL, FB2A.DE, EDP.PT'),
+            'Quantidade':st.column_config.NumberColumn('Quantidade',min_value=0.0,step=0.01),
+            'Preço médio':st.column_config.NumberColumn('Preço médio',min_value=0.0,step=0.01),
+            'Preço alvo pessoal':st.column_config.NumberColumn('Preço alvo pessoal',min_value=0.0,step=0.01),
+            'Objetivo':st.column_config.SelectboxColumn('Objetivo',options=['Curto prazo','Longo prazo']),
+            'Origem':st.column_config.TextColumn('Origem'),
+            'Tese/nota':st.column_config.TextColumn('Tese/nota'),
+        }
     )
-    if st.button('Avaliar carteira',type='primary'):
-        rows=[]
+
+    p1,p2=st.columns(2)
+    with p1:
+        if st.button('Guardar alterações da carteira',key='portfolio_save'):
+            st.session_state.portfolio_input=portfolio.fillna('').to_dict('records')
+            st.success('Alterações guardadas nesta sessão.')
+    with p2:
+        csv_port=portfolio.to_csv(index=False).encode('utf-8')
+        st.download_button('Descarregar carteira CSV',csv_port,'minha_carteira.csv','text/csv',use_container_width=True)
+
+    if st.button('Atualizar e analisar carteira agora',type='primary',key='portfolio_analyze'):
+        st.session_state.portfolio_input=portfolio.fillna('').to_dict('records')
+        temp=[]
         for _,r in portfolio.iterrows():
-            t=str(r.get('Ticker XTB','')).upper().strip(); q=float(r.get('Quantidade',0) or 0); pm=float(r.get('Preço médio',0) or 0); pa=float(r.get('Preço alvo',0) or 0)
-            if not t or q<=0 or pm<=0 or pa<=0: continue
+            t=str(r.get('Ticker XTB','')).upper().strip()
+            q=_safe_float(r.get('Quantidade')) or 0
+            pm=_safe_float(r.get('Preço médio')) or 0
+            pa=_safe_float(r.get('Preço alvo pessoal')) or 0
+            objective=str(r.get('Objetivo') or 'Longo prazo')
+            origin=str(r.get('Origem') or 'Posição existente')
+            thesis=str(r.get('Tese/nota') or '')
+            entry_date=str(r.get('Data entrada') or '')
+            if not t or q<=0 or pm<=0:
+                continue
             try:
                 a=analyze_asset(t); add_watchlist(a['xtb_ticker'])
                 price=float(a['row']['Close']); cur=a['currency']
-                rows.append({'Ticker XTB':a['xtb_ticker'],'Ticker técnico':a['source_ticker'],'Empresa':a['company'],'Mercado':a['market'],'Bolsa':a['exchange'],'Tipo':a['kind'],'Moeda':cur,'Preço atual':price,'Quantidade':q,'Preço médio':pm,'P/L %':(price/pm-1)*100,'Preço alvo':pa,'Distância ao alvo %':(pa/price-1)*100,'Técnica':a['tech_label'],'Fundamental/ETF':a['fund_label'],'Decisão':decision(a)})
+                pe=to_eur(price,cur)
+                temp.append({'a':a,'price':price,'currency':cur,'price_eur':pe,'q':q,'pm':pm,'pa':pa,'objective':objective,'origin':origin,'thesis':thesis,'entry_date':entry_date})
             except Exception as e:
-                rows.append({'Ticker':t,'Erro':str(e)})
-        if rows: st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
+                temp.append({'error':str(e),'ticker':t})
+
+        valid_vals=[x for x in temp if 'a' in x and x['price_eur'] is not None]
+        total=sum(x['price_eur']*x['q'] for x in valid_vals)
+        rows=[]
+        for x in temp:
+            if 'error' in x:
+                rows.append({'Ticker XTB':x['ticker'],'Erro':x['error']})
+                continue
+            a=x['a']; price=x['price']; cur=x['currency']; pe=x['price_eur']; q=x['q']; pm=x['pm']; pa=x['pa']; objective=x['objective']; origin=x.get('origin',''); thesis=x.get('thesis',''); entry_date=x.get('entry_date','')
+            value_eur=pe*q if pe is not None else None
+            weight=value_eur/total*100 if value_eur is not None and total>0 else None
+            action,reason=portfolio_rule_action(a,pa,weight)
+            tt=a.get('target_time',{})
+            target_eur=to_eur(a['target'],cur)
+            gain_target=(target_eur-pe)*q if target_eur is not None and pe is not None else None
+            personal_time=None; personal_hit=None; personal_samples=0
+            if pa>price:
+                pts=target_time_stats(a['raw'],a['row'],pa,max_days=180)
+                personal_time=pts.get('median_days'); personal_hit=pts.get('hit_rate'); personal_samples=pts.get('samples',0)
+            pm_eur=to_eur(pm,cur)
+            rows.append({
+                'Ticker XTB':a['xtb_ticker'],'Empresa':a['company'],'Mercado':a['market'],'Setor':sector_name(a['info']),'Tipo':a['kind'],'Moeda':cur,
+                'Preço atual':price,'Preço atual EUR':pe,'Quantidade':q,'Valor atual EUR':value_eur,'Peso carteira %':weight,
+                'Preço médio':pm,'P/L %':(price/pm-1)*100,'P/L EUR aprox.':((pe-pm_eur)*q if pe is not None and pm_eur is not None else None),
+                'Ação da regra agora':action,'Motivo':reason,'Técnica':a['tech_label'],'Fundamental/ETF':a['fund_label'],'Completude %':a['fund_complete'],
+                'Stop técnico':a['stop'],'Alvo técnico (2× risco)':a['target'],'Ganho potencial no alvo técnico EUR':gain_target,
+                'Tempo hist. mediano alvo técnico':tt.get('median_days'),'Taxa hist. alvo técnico %':tt.get('hit_rate'),'Amostras alvo técnico':tt.get('samples'),
+                'Preço alvo pessoal':pa if pa>0 else None,'Tempo hist. mediano alvo pessoal':personal_time,'Taxa hist. alvo pessoal %':personal_hit,'Amostras alvo pessoal':personal_samples,
+                'Objetivo':objective,'Origem':origin,'Data entrada':entry_date,'Tese/nota':thesis,'Data preço':str(a['df'].index[-1])
+            })
+        if rows:
+            st.session_state['portfolio_rows']=rows
+            out=pd.DataFrame(rows)
+            st.dataframe(out,hide_index=True,use_container_width=True)
+            if 'Valor atual EUR' in out.columns:
+                valid=out[pd.to_numeric(out['Valor atual EUR'],errors='coerce').notna()].copy()
+            else:
+                valid=pd.DataFrame()
+            if not valid.empty:
+                total=float(pd.to_numeric(valid['Valor atual EUR'],errors='coerce').sum())
+                if total>0:
+                    by_sector=valid.groupby('Setor',dropna=False)['Valor atual EUR'].sum().sort_values(ascending=False)
+                    st.markdown('**Exposição atual por setor**')
+                    st.dataframe(pd.DataFrame({'Setor':by_sector.index,'Peso %':(by_sector.values/total*100)}),hide_index=True,use_container_width=True)
+            st.caption('“VENDER / REDUZIR — REGRA” só aparece quando técnica e fundamentais/qualidade estão simultaneamente fracos e há dados suficientes. Não é acionado apenas por uma queda de preço.')
+
 
 with TABS[4]:
+    st.subheader('Histórico das tuas decisões')
+    st.write('Aqui podes ver **o que aconteceu depois de aceitares ou rejeitares uma oportunidade**. O objetivo é medir o processo sem apagar decisões que correram pior.')
+
+    hu=st.file_uploader('Carregar histórico de decisões CSV (opcional)',type=['csv'],key='decision_upload')
+    if hu is not None and st.button('Importar histórico',key='decision_import'):
+        try:
+            hdf=pd.read_csv(hu)
+            st.session_state.decision_history=hdf.to_dict('records')
+            st.success('Histórico importado.')
+        except Exception as e:
+            st.error(f'Não foi possível importar: {e}')
+
+    if st.session_state.decision_history:
+        hist_raw=pd.DataFrame(st.session_state.decision_history)
+        st.download_button('Descarregar histórico CSV',hist_raw.to_csv(index=False).encode('utf-8'),'historico_decisoes.csv','text/csv')
+        if st.button('Atualizar preços e analisar decisões',type='primary',key='decision_revalue'):
+            with st.spinner('A atualizar cada decisão com os dados mais recentes...'):
+                hist=revalue_decision_history()
+            st.session_state['decision_revalued']=hist
+        hist=st.session_state.get('decision_revalued')
+        if hist is not None and not hist.empty:
+            cols=[c for c in [
+                'Data decisão UTC','Ticker XTB','Empresa','Decisão utilizador','Preço na decisão','Moeda','Preço atual',
+                'Variação desde decisão %','Diferença € na quantidade registada','Percurso desde decisão',
+                'Técnica no momento','Técnica atual','Fundamental/ETF no momento','Fundamental/ETF atual','Regra atual','Data preço atual'
+            ] if c in hist.columns]
+            st.dataframe(hist[cols].sort_values('Data decisão UTC',ascending=False),hide_index=True,use_container_width=True)
+
+            rejected=hist[hist['Decisão utilizador'].astype(str).str.upper()=='REJEITADA'].copy()
+            if not rejected.empty and 'Variação desde decisão %' in rejected.columns:
+                st.markdown('### Oportunidades rejeitadas — o que aconteceu depois')
+                rej_cols=[c for c in ['Data decisão UTC','Ticker XTB','Preço na decisão','Preço atual','Variação desde decisão %','Percurso desde decisão','Regra atual'] if c in rejected.columns]
+                st.dataframe(rejected[rej_cols].sort_values('Data decisão UTC',ascending=False),hide_index=True,use_container_width=True)
+                vals=pd.to_numeric(rejected['Variação desde decisão %'],errors='coerce').dropna()
+                if not vals.empty:
+                    med=float(vals.median())
+                    pos=float((vals>0).mean()*100)
+                    st.info(f'Nas oportunidades rejeitadas com dados atuais, a variação mediana desde a rejeição é **{med:.2f}%** e **{pos:.1f}%** estão atualmente acima do preço em que foram rejeitadas. Isto mede o resultado posterior; não prova que a decisão original estava certa ou errada.')
+        else:
+            st.info('Carrega em **Atualizar preços e analisar decisões** para comparar os preços atuais com os preços em que aceitaste/rejeitaste.')
+    else:
+        st.info('Ainda não existem decisões registadas. Usa **Aceitar** ou **Rejeitar e acompanhar** no separador Plano de hoje.')
+
+with TABS[5]:
     st.subheader('Top 10 por mercado ou global')
     markets=st.multiselect('Mercados a comparar',list(MARKETS.keys()),default=['EUA','Alemanha','Portugal'],key='topmarkets')
     if st.session_state.watchlist:
@@ -901,7 +1398,7 @@ with TABS[4]:
             st.caption('A ordenação usa apenas métricas calculadas. “CANDIDATO A ENTRADA” exige técnica forte + fundamental/ETF forte + dados suficientes.')
         else: st.warning('Sem dados suficientes.')
 
-with TABS[5]:
+with TABS[6]:
     st.subheader('Desempenho histórico da regra técnica')
     bt=st.text_input('Ticker para backtest',value='AAPL.US').upper().strip()
     b1,b2,b3=st.columns(3)
@@ -927,7 +1424,7 @@ with TABS[5]:
                 st.caption('Backtest técnico, não inclui análise fundamental histórica ponto-a-ponto. Custos são os valores introduzidos acima.')
         except Exception as e: st.error(str(e))
 
-with TABS[6]:
+with TABS[7]:
     st.subheader('Metodologia e regras de integridade dos dados')
     st.markdown('''
 - **Nenhum número é preenchido por suposição.** Se o fornecedor não disponibilizar um campo, aparece `N/D` ou “dados insuficientes”.
@@ -944,7 +1441,115 @@ with TABS[6]:
 - **Curto prazo setorial:** score composto de técnica, momentum 1/3 meses e volume relativo; horizonte aproximado de 5–30 dias de mercado.
 - **Longo prazo setorial:** combina qualidade fundamental, avaliação relativa dentro do setor, tendência de 12 meses e completude dos dados; horizonte aproximado de 6–24 meses.
 - **Avaliação relativa:** P/E, Forward P/E, P/B, EV/EBITDA e FCF yield são comparados dentro do setor quando existem pelo menos quatro observações válidas; métricas em falta não são inventadas.
+
+- **Construir património:** o score “próximo euro” parte do score de longo prazo e ajusta por concentração da carteira e pelo drawdown histórico face à tolerância indicada. Não força investimento.
+- **Diário de decisões:** aceitar ou rejeitar uma oportunidade guarda o preço, stop, alvo, scores e contexto desse momento. O histórico compara depois com o preço atual sem reescrever a decisão passada.
+- **Persistência:** a sessão do Streamlit pode reiniciar; usa os botões de descarregar CSV da carteira e do histórico e volta a importá-los quando necessário.
+- **Risco de longo prazo:** a app mostra volatilidade anualizada e drawdown histórico de 1 e 3 anos; estes valores descrevem o passado e não limitam perdas futuras.
+- **Consenso externo:** quando o fornecedor disponibiliza `targetMeanPrice` e número de analistas, esses campos aparecem separados da análise própria e não são tratados como previsão garantida.
 ''')
+
+
+with TABS[8]:
+    st.subheader('Construir património — melhor utilização do próximo euro')
+    st.write(
+        'Este modo procura decidir **onde faria mais sentido colocar novo capital**, sem obrigar a investir. '
+        'Combina qualidade fundamental/ETF, avaliação relativa ao setor, tendência de longo prazo, risco histórico e concentração da tua carteira.'
+    )
+    w1,w2,w3,w4=st.columns(4)
+    with w1:
+        new_capital=st.number_input('Novo capital disponível (€)',min_value=0.0,value=300.0,step=50.0,key='wealth_capital')
+    with w2:
+        wealth_horizon=st.selectbox('Horizonte',['3–5 anos','5–10 anos','10+ anos'],index=1,key='wealth_horizon')
+    with w3:
+        tolerated_dd=st.selectbox('Queda histórica que tolerarias sem vender',[10,20,30,40,50],index=2,format_func=lambda x:f'{x}%',key='wealth_dd')
+    with w4:
+        max_positions=st.slider('Máximo de novas posições',1,5,3,key='wealth_n')
+
+    q1,q2=st.columns(2)
+    with q1:
+        wealth_markets=st.multiselect('Mercados',list(MARKETS.keys()),default=['EUA','Alemanha','Portugal'],key='wealth_markets')
+    with q2:
+        max_per_asset=st.slider('Máximo do novo capital por ativo',10,100,40,5,format='%d%%',key='wealth_max_asset')
+
+    extra=st.text_area(
+        'ETFs/ações adicionais em ticker XTB (opcional, separados por vírgulas)',
+        value='',
+        placeholder='Ex.: ASML.NL, META.US, ...',
+        key='wealth_extra'
+    )
+    include_watch_wealth=st.checkbox('Incluir watchlist',value=True,key='wealth_watch')
+
+    asset_w,sector_w,portfolio_total=portfolio_exposures()
+    if portfolio_total>0:
+        st.info(f'Carteira avaliada nesta sessão: aproximadamente €{portfolio_total:,.2f}. A concentração atual será usada no score.')
+    else:
+        st.info('Para considerar concentração da tua carteira, avalia primeiro o separador **Minha carteira** nesta sessão.')
+
+    if st.button('Analisar melhor utilização do novo capital',type='primary',key='wealth_run'):
+        if new_capital<=0:
+            st.error('Indica um valor de novo capital superior a zero.')
+        elif not wealth_markets and not extra.strip():
+            st.error('Escolhe pelo menos um mercado ou adiciona tickers XTB.')
+        else:
+            tickers=[]
+            for m in wealth_markets:
+                tickers += MARKETS[m]
+            if include_watch_wealth:
+                tickers += st.session_state.watchlist
+            tickers += [x.strip().upper() for x in extra.replace('\n',',').split(',') if x.strip()]
+            tickers=list(dict.fromkeys(tickers))[:120]
+            rows=[]
+            prog=st.progress(0,text='A comparar qualidade, avaliação, risco e diversificação...')
+            for n,ticker in enumerate(tickers,start=1):
+                try:
+                    rows.append(wealth_candidate_row(ticker,asset_w,sector_w,tolerated_dd))
+                except Exception:
+                    pass
+                prog.progress(n/max(len(tickers),1),text=f'A analisar {n}/{len(tickers)}')
+            prog.empty()
+            if not rows:
+                st.warning('Não foi possível obter dados suficientes para os ativos selecionados.')
+            else:
+                wdf=add_wealth_scores(pd.DataFrame(rows))
+                wdf=wdf.sort_values(['Score próximo euro','Score longo prazo'],ascending=False,na_position='last').reset_index(drop=True)
+                st.session_state['wealth_df']=wdf
+                eligible=wdf[wdf['Decisão longo prazo']=='CANDIDATO A NOVO CAPITAL'].copy()
+                if eligible.empty:
+                    st.warning('**AGUARDAR** — nenhum ativo passou os filtros mínimos definidos para novo capital.')
+                else:
+                    chosen=eligible.head(max_positions).copy()
+                    per_cap=new_capital*(max_per_asset/100)
+                    base=min(new_capital/max(len(chosen),1),per_cap)
+                    chosen['Montante indicativo €']=base
+                    total_alloc=float(chosen['Montante indicativo €'].sum())
+                    cash=max(0.0,new_capital-total_alloc)
+                    st.success(f'Existem {len(chosen)} candidato(s) que passam os filtros. Montante analisado: €{new_capital:,.2f}.')
+                    st.dataframe(chosen[[
+                        'Ticker XTB','Empresa','Mercado','Setor','Tipo','Moeda','Preço aprox. EUR',
+                        'Score próximo euro','Score longo prazo','Score fundamental','Score avaliação relativa',
+                        'Volatilidade anualizada 1A %','Drawdown máx. 3A %','Potencial consenso %','Nº analistas',
+                        'Ajuste diversificação','Motivos ajuste','Decisão longo prazo','Montante indicativo €','Data ref.'
+                    ]],hide_index=True,use_container_width=True)
+                    if cash>0.01:
+                        st.info(f'Capital não alocado pelas regras: **€{cash:,.2f}**. A app não força investimento do montante restante.')
+
+                st.markdown('### Ranking completo — prioridade para o próximo euro')
+                st.dataframe(wdf[[
+                    'Ticker XTB','Empresa','Mercado','Setor','Tipo','Preço aprox. EUR',
+                    'Score próximo euro','Score longo prazo','Score fundamental','Fundamental/ETF',
+                    'Score avaliação relativa','Score técnico','Técnica','Completude fundamental %',
+                    'Volatilidade anualizada 1A %','Drawdown máx. 1A %','Drawdown máx. 3A %',
+                    'Preço alvo médio consenso','Nº analistas','Potencial consenso %',
+                    'Ajuste diversificação','Motivos ajuste','Decisão longo prazo','Data ref.'
+                ]].head(30),hide_index=True,use_container_width=True)
+                st.caption(
+                    '“Score próximo euro” = score de longo prazo ajustado apenas pela concentração atual da carteira e pela tolerância de drawdown indicada. '
+                    'O consenso de analistas é mostrado quando a fonte o disponibiliza, mas não é tratado como facto nem como garantia e não substitui a análise fundamental.'
+                )
+                st.caption(
+                    'O montante indicativo respeita o máximo por ativo definido por ti. Não pressupõe que devas investir todo o capital e não usa o plafond de trading para repor perdas.'
+                )
 
 
 # Nota de interface: "Alvo técnico (2× o risco)" é distinto de qualquer preço alvo fundamental.
