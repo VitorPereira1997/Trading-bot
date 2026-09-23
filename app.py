@@ -339,6 +339,56 @@ def historical_scenarios(raw, current_row, horizons=(5,10,15,30)):
         })
     return pd.DataFrame(out)
 
+def target_time_stats(raw, current_row, target_price, max_days=60):
+    """
+    Estima historicamente o tempo até um movimento equivalente ao alvo atual.
+    Usa apenas estados técnicos semelhantes e o máximo diário (High) para saber
+    quando o nível teria sido tocado. Não é uma previsão.
+    """
+    d = indicators(raw).dropna().copy()
+    if len(d) < 320:
+        return {'median_days': None, 'hit_rate': None, 'samples': 0, 'hits': 0, 'move_pct': None}
+
+    current_price = float(current_row['Close'])
+    if current_price <= 0 or target_price <= current_price:
+        return {'median_days': None, 'hit_rate': None, 'samples': 0, 'hits': 0, 'move_pct': None}
+
+    move_pct = float(target_price / current_price - 1.0)
+    current_score, _, _ = technical_score(current_row)
+    curr_rsi = float(current_row['RSI14'])
+    curr_trend = bool(current_row['EMA20'] > current_row['EMA50'] > current_row['EMA200'])
+
+    times = []
+    samples = 0
+    last_selected = -999
+
+    # Espaçamento mínimo de 5 dias reduz observações quase duplicadas.
+    for i in range(200, len(d) - max_days):
+        if i - last_selected < 5:
+            continue
+        r = d.iloc[i]
+        sc, _, _ = technical_score(r)
+        tr = bool(r['EMA20'] > r['EMA50'] > r['EMA200'])
+        if abs(sc-current_score) <= 12.5 and abs(float(r['RSI14'])-curr_rsi) <= 7 and tr == curr_trend:
+            samples += 1
+            last_selected = i
+            hist_target = float(r['Close']) * (1.0 + move_pct)
+            future_high = d['High'].iloc[i+1:i+1+max_days]
+            touched = np.where(future_high.to_numpy(dtype=float) >= hist_target)[0]
+            if len(touched):
+                times.append(int(touched[0]) + 1)
+
+    if samples < 10:
+        return {'median_days': None, 'hit_rate': None, 'samples': samples, 'hits': len(times), 'move_pct': move_pct*100}
+
+    return {
+        'median_days': float(np.median(times)) if times else None,
+        'hit_rate': float(len(times) / samples * 100),
+        'samples': samples,
+        'hits': len(times),
+        'move_pct': move_pct*100,
+    }
+
 def entry_levels(row):
     entry=float(row['Close'])
     a=float(row['ATR14'])
@@ -370,6 +420,7 @@ def analyze_asset(ticker, market_hint=None):
     info,kind,fund_label,fund_score,complete,fund_table=fundamental_analysis(source)
     entry,stop,target=entry_levels(row)
     scenarios=historical_scenarios(raw,row)
+    target_time=target_time_stats(raw,row,target,max_days=60)
     currency=str(info.get('currency') or ident.get('expected_currency') or 'N/D').upper()
     company=str(info.get('longName') or info.get('shortName') or 'N/D')
     exchange=str(info.get('exchange') or info.get('fullExchangeName') or ident.get('venue') or 'N/D')
@@ -385,7 +436,8 @@ def analyze_asset(ticker, market_hint=None):
         'expected_currency':ident.get('expected_currency'),
         'raw':raw,'df':d,'row':row,'tech_score':tech_score,'tech_label':tech_label,'tech_tests':tech_tests,
         'info':info,'kind':kind,'fund_label':fund_label,'fund_score':fund_score,'fund_complete':complete,
-        'fund_table':fund_table,'entry':entry,'stop':stop,'target':target,'scenarios':scenarios
+        'fund_table':fund_table,'entry':entry,'stop':stop,'target':target,'scenarios':scenarios,
+        'target_time':target_time
     }
 
 def decision(a):
@@ -414,7 +466,7 @@ def compact_candidate(ticker):
         'Técnica':a['tech_label'],'Score técnico':a['tech_score'],
         'Fundamental/ETF':a['fund_label'],'Completude %':a['fund_complete'],
         'Preço':price,'Preço aprox. EUR':price_eur,
-        'Stop':a['stop'],'Alvo técnico 2R':a['target'],
+        'Stop':a['stop'],'Alvo técnico (2× o risco)':a['target'],
         'Decisão':decision(a),'Data ref.':str(a['df'].index[-1].date()),
         '_analysis':a
     }
@@ -531,8 +583,8 @@ with TABS[0]:
                             x1.metric('Valor a usar',f'€{invested:.2f}')
                             x2.metric('Quantidade',str(qty))
                             x3.metric('Perda planeada',f'€{potential_loss:.2f}')
-                            x4.metric('Ganho no alvo 2R',f'€{potential_gain:.2f}' if potential_gain is not None else 'N/D')
-                            st.write(f"Entrada ref.: **{a['entry']:.2f} {currency}** · Stop: **{a['stop']:.2f}** · Alvo técnico 2R: **{a['target']:.2f}**")
+                            x4.metric('Ganho no alvo técnico (2× o risco)',f'€{potential_gain:.2f}' if potential_gain is not None else 'N/D')
+                            st.write(f"Entrada ref.: **{a['entry']:.2f} {currency}** · Stop: **{a['stop']:.2f}** · Alvo técnico (2× o risco): **{a['target']:.2f}**")
                             st.write(f"Técnica: **{a['tech_label']} ({a['tech_score']}/100)** · Fundamental/ETF: **{a['fund_label']}** · Completude: **{a['fund_complete']}%**")
                             if not a['scenarios'].empty:
                                 st.markdown('**Cenários históricos comparáveis — não são previsões:**')
@@ -558,8 +610,19 @@ with TABS[1]:
             m1,m2,m3,m4=st.columns(4)
             m1.metric('Preço',f'{a["entry"]:.2f}')
             m2.metric('Stop técnico',f'{a["stop"]:.2f}')
-            m3.metric('Alvo técnico 2R',f'{a["target"]:.2f}')
+            m3.metric('Alvo técnico (2× o risco)',f'{a["target"]:.2f}')
             m4.metric('Score técnico',f'{a["tech_score"]}/100')
+
+            tt=a.get('target_time',{})
+            t1,t2,t3=st.columns(3)
+            if tt.get('median_days') is not None:
+                t1.metric('Tempo histórico mediano até ao alvo',f"{tt['median_days']:.1f} dias de mercado")
+            else:
+                t1.metric('Tempo histórico mediano até ao alvo','Dados insuficientes')
+            t2.metric('Casos que atingiram o alvo em até 60 dias',f"{tt['hit_rate']:.1f}%" if tt.get('hit_rate') is not None else 'Dados insuficientes')
+            t3.metric('Amostras históricas semelhantes',str(tt.get('samples',0)))
+            st.caption('Tempo até ao alvo = mediana dos casos históricos tecnicamente semelhantes que tocaram um movimento percentual equivalente ao alvo técnico (2× o risco) atual. Usa o máximo diário e um horizonte de 60 dias de mercado; não é uma previsão.')
+
             st.write(f"Técnica: **{a['tech_label']}** · Fundamental/qualidade ETF: **{a['fund_label']}** · Dados fundamentais disponíveis: **{a['fund_complete']}%**")
             st.markdown('**Critérios técnicos**')
             st.dataframe(pd.DataFrame([{'Critério':k,'Cumpre':'Sim' if v else 'Não'} for k,v in a['tech_tests'].items()]),hide_index=True,use_container_width=True)
@@ -652,7 +715,7 @@ with TABS[5]:
 - **Nenhum número é preenchido por suposição.** Se o fornecedor não disponibilizar um campo, aparece `N/D` ou “dados insuficientes”.
 - **Técnica e fundamental são separadas.** Uma entrada só passa a regra quando ambos os blocos são fortes e a completude fundamental/ETF é suficiente.
 - **Cenários de 5/10/15/30 dias** usam retornos observados em estados técnicos históricos semelhantes. São estatísticas condicionais, não previsões.
-- **Preço, stop e alvo 2R** são calculados a partir do último fecho e ATR; a fórmula é reproduzível e visível.
+- **Preço, stop e alvo técnico (2× o risco)** são calculados a partir do último fecho e ATR; a fórmula é reproduzível e visível.
 - **Dimensionamento pessoal** só é feito quando o utilizador introduz capital, perda máxima por operação e perda máxima diária.
 - **Ações acima do plafond não são ocultadas.** Podem aparecer no ranking; a app apenas impede dimensionamento incompatível com o capital/risco introduzido.
 - **Mercados suportados:** EUA, Alemanha, Portugal, França, Países Baixos, Espanha, Itália, Reino Unido e Suíça, conforme disponibilidade do fornecedor.
@@ -660,3 +723,6 @@ with TABS[5]:
 - **Sem substituição silenciosa de bolsa:** se a fonte técnica não tiver o instrumento correspondente, a app devolve erro em vez de trocar para outra praça/moeda.
 - **Fonte atual de séries/fundamentais:** Yahoo Finance via `yfinance`. Para decisões reais, confirma preço, spread, sessão e documentos da empresa/ETF na XTB e nas relações com investidores/regulador.
 ''')
+
+
+# Nota de interface: "Alvo técnico (2× o risco)" é distinto de qualquer preço alvo fundamental.
