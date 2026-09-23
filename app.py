@@ -453,6 +453,148 @@ def universe_for(markets):
     out += st.session_state.watchlist
     return list(dict.fromkeys(out))
 
+SECTOR_PT = {
+    'Technology':'Tecnologia',
+    'Financial Services':'Serviços financeiros',
+    'Financial':'Serviços financeiros',
+    'Industrials':'Industriais',
+    'Communication Services':'Serviços de comunicação',
+    'Healthcare':'Saúde',
+    'Consumer Cyclical':'Consumo discricionário',
+    'Consumer Defensive':'Consumo defensivo',
+    'Energy':'Energia',
+    'Basic Materials':'Materiais básicos',
+    'Real Estate':'Imobiliário',
+    'Utilities':'Serviços públicos',
+}
+
+def sector_name(info):
+    raw=str(info.get('sector') or '').strip()
+    if raw:
+        return SECTOR_PT.get(raw, raw)
+    if asset_kind(info) == 'ETF':
+        cat=str(info.get('category') or '').strip()
+        return f'ETF — {cat}' if cat else 'ETF — categoria N/D'
+    return 'N/D'
+
+def _return_pct(df, days):
+    s=df['Close'].dropna()
+    if len(s) <= days:
+        return None
+    return float((s.iloc[-1]/s.iloc[-days-1]-1)*100)
+
+def _norm(v, lo, hi):
+    if v is None or not np.isfinite(v):
+        return None
+    if hi <= lo:
+        return None
+    return float(max(0.0,min(100.0,(v-lo)/(hi-lo)*100)))
+
+def sector_asset_row(ticker):
+    a=analyze_asset(ticker)
+    info=a['info']; d=a['df']; row=a['row']
+    market_cap=_num(info,'marketCap')
+    trailing_pe=_num(info,'trailingPE')
+    forward_pe=_num(info,'forwardPE')
+    price_to_book=_num(info,'priceToBook')
+    ev_ebitda=_num(info,'enterpriseToEbitda')
+    fcf=_num(info,'freeCashflow')
+    fcf_yield=(fcf/market_cap*100) if fcf is not None and market_cap and market_cap>0 else None
+    ret1=_return_pct(d,21); ret3=_return_pct(d,63); ret6=_return_pct(d,126); ret12=_return_pct(d,252)
+    vol_rel=float(row['Volume']/row['VOL20']) if row['VOL20'] and np.isfinite(row['VOL20']) else None
+    above200=bool(row['Close']>row['EMA200'])
+    tech=float(a['tech_score'])
+    fund=float(a['fund_score']) if a['fund_score'] is not None else None
+    short_parts=[
+        (tech,0.60),
+        (_norm(ret1,-12,18),0.18),
+        (_norm(ret3,-25,35),0.12),
+        (_norm(vol_rel,0.7,2.0),0.10),
+    ]
+    valid=[(v,w) for v,w in short_parts if v is not None]
+    short_score=sum(v*w for v,w in valid)/sum(w for _,w in valid) if valid else None
+    return {
+        'Ticker XTB':a['xtb_ticker'],'Ticker técnico':a['source_ticker'],'Empresa':a['company'],
+        'Mercado':a['market'],'Setor':sector_name(info),'Indústria':str(info.get('industry') or 'N/D'),
+        'Moeda':a['currency'],'Tipo':a['kind'],'Preço':float(row['Close']),
+        'Capitalização':market_cap,'Retorno 1M %':ret1,'Retorno 3M %':ret3,'Retorno 6M %':ret6,'Retorno 12M %':ret12,
+        'Acima EMA200':above200,'RSI':float(row['RSI14']),'Volume relativo':vol_rel,
+        'Técnica':a['tech_label'],'Score técnico':tech,'Fundamental/ETF':a['fund_label'],
+        'Score fundamental':fund,'Completude fundamental %':float(a['fund_complete']),
+        'P/E':trailing_pe,'Forward P/E':forward_pe,'P/B':price_to_book,'EV/EBITDA':ev_ebitda,'FCF yield %':fcf_yield,
+        'Crescimento receitas %':(_num(info,'revenueGrowth')*100 if _num(info,'revenueGrowth') is not None else None),
+        'Crescimento lucros %':(_num(info,'earningsGrowth')*100 if _num(info,'earningsGrowth') is not None else None),
+        'Margem operacional %':(_num(info,'operatingMargins')*100 if _num(info,'operatingMargins') is not None else None),
+        'ROE %':(_num(info,'returnOnEquity')*100 if _num(info,'returnOnEquity') is not None else None),
+        'Dívida/Capital próprio %':_num(info,'debtToEquity'),
+        'Score curto prazo':round(short_score,1) if short_score is not None else None,
+        'Data ref.':str(d.index[-1].date()),
+    }
+
+def add_sector_relative_scores(df):
+    if df.empty:
+        return df
+    out=df.copy()
+    out['Score avaliação relativa']=np.nan
+    out['Score longo prazo']=np.nan
+    out['Passa filtros integrados']='Não'
+    for sector, idx in out.groupby('Setor').groups.items():
+        sub=out.loc[idx]
+        val_parts=[]
+        for col, higher_better in [('P/E',False),('Forward P/E',False),('P/B',False),('EV/EBITDA',False),('FCF yield %',True)]:
+            s=pd.to_numeric(sub[col],errors='coerce')
+            valid=s.where(s>0) if col!='FCF yield %' else s
+            if valid.notna().sum() >= 4:
+                ranks=valid.rank(pct=True,ascending=True)
+                score=(ranks*100) if higher_better else ((1-ranks)*100)
+                val_parts.append(score)
+        if val_parts:
+            val=pd.concat(val_parts,axis=1).mean(axis=1,skipna=True)
+            out.loc[idx,'Score avaliação relativa']=val
+        for i in idx:
+            fund=out.at[i,'Score fundamental']; val=out.at[i,'Score avaliação relativa']
+            trend=_norm(out.at[i,'Retorno 12M %'],-35,60)
+            complete=out.at[i,'Completude fundamental %']
+            parts=[]
+            if pd.notna(fund): parts.append((float(fund),0.55))
+            if pd.notna(val): parts.append((float(val),0.20))
+            if trend is not None: parts.append((float(trend),0.15))
+            if pd.notna(complete): parts.append((float(complete),0.10))
+            if parts:
+                out.at[i,'Score longo prazo']=round(sum(v*w for v,w in parts)/sum(w for _,w in parts),1)
+            tech=out.at[i,'Score técnico']; comp=out.at[i,'Completude fundamental %']
+            fundv=out.at[i,'Score fundamental']
+            if pd.notna(tech) and pd.notna(fundv) and tech>=75 and fundv>=70 and comp>=60:
+                out.at[i,'Passa filtros integrados']='Sim'
+    return out
+
+def sector_summary(df):
+    if df.empty:
+        return pd.DataFrame()
+    total_cap=pd.to_numeric(df['Capitalização'],errors='coerce').sum(min_count=1)
+    rows=[]
+    for sector,g in df.groupby('Setor'):
+        cap=pd.to_numeric(g['Capitalização'],errors='coerce').sum(min_count=1)
+        rows.append({
+            'Setor':sector,
+            'Nº ativos':len(g),
+            'Peso no universo analisado %':(float(cap/total_cap*100) if pd.notna(cap) and pd.notna(total_cap) and total_cap>0 else None),
+            'Retorno mediano 1M %':pd.to_numeric(g['Retorno 1M %'],errors='coerce').median(),
+            'Retorno mediano 3M %':pd.to_numeric(g['Retorno 3M %'],errors='coerce').median(),
+            'Retorno mediano 6M %':pd.to_numeric(g['Retorno 6M %'],errors='coerce').median(),
+            'Retorno mediano 12M %':pd.to_numeric(g['Retorno 12M %'],errors='coerce').median(),
+            'Acima EMA200 %':float(pd.Series(g['Acima EMA200']).mean()*100),
+            'RSI mediano':pd.to_numeric(g['RSI'],errors='coerce').median(),
+            'Score técnico mediano':pd.to_numeric(g['Score técnico'],errors='coerce').median(),
+            'Score curto prazo mediano':pd.to_numeric(g['Score curto prazo'],errors='coerce').median(),
+            'Score fundamental mediano':pd.to_numeric(g['Score fundamental'],errors='coerce').median(),
+            'Score longo prazo mediano':pd.to_numeric(g['Score longo prazo'],errors='coerce').median(),
+            'P/E mediano':pd.to_numeric(g['P/E'],errors='coerce').where(pd.to_numeric(g['P/E'],errors='coerce')>0).median(),
+            'Crescimento receitas mediano %':pd.to_numeric(g['Crescimento receitas %'],errors='coerce').median(),
+            'Completude fundamental média %':pd.to_numeric(g['Completude fundamental %'],errors='coerce').mean(),
+        })
+    return pd.DataFrame(rows).sort_values('Score longo prazo mediano',ascending=False,na_position='last').reset_index(drop=True)
+
 def compact_candidate(ticker):
     a=analyze_asset(ticker)
     row=a['row']
@@ -522,7 +664,7 @@ def source_block(ticker, a):
         st.info(f"Ticker XTB: {xtb} → ticker técnico usado apenas para dados: {source}. A identidade da posição continua a ser {xtb}.")
     st.markdown(f'[Abrir fonte técnica de {source}]({url})')
 
-TABS = st.tabs(['Plano de hoje','Analisar ativo','Minha carteira','Top 10','Desempenho','Metodologia'])
+TABS = st.tabs(['Plano de hoje','Analisar ativo','Setores','Minha carteira','Top 10','Desempenho','Metodologia'])
 
 with TABS[0]:
     st.subheader('Quero usar capital hoje')
@@ -641,6 +783,82 @@ with TABS[1]:
             st.error(str(e))
 
 with TABS[2]:
+    st.subheader('Análise por setor')
+    st.write(
+        'Esta área compara setores e empresas com dois horizontes separados: **curto prazo (aprox. 5–30 dias de mercado)** '
+        'e **longo prazo (aprox. 6–24 meses)**. O ranking não é uma garantia de retorno.'
+    )
+    s1,s2=st.columns([2,1])
+    with s1:
+        sector_markets=st.multiselect('Mercados para análise setorial',list(MARKETS.keys()),default=['EUA','Alemanha','Portugal'],key='sector_markets')
+    with s2:
+        max_sector_assets=st.slider('Máximo de ativos a analisar',20,140,80,10,key='sector_max')
+    include_watch=st.checkbox('Incluir watchlist',value=True,key='sector_watch')
+
+    if st.button('Gerar análise setorial',type='primary',key='sector_generate'):
+        tickers=[]
+        for m in sector_markets:
+            tickers += MARKETS[m]
+        if include_watch:
+            tickers += st.session_state.watchlist
+        tickers=list(dict.fromkeys(tickers))[:max_sector_assets]
+        rows=[]
+        prog=st.progress(0,text='A recolher dados por setor...')
+        for n,ticker in enumerate(tickers, start=1):
+            try:
+                row=sector_asset_row(ticker)
+                if row['Tipo']=='Ação':
+                    rows.append(row)
+            except Exception:
+                pass
+            prog.progress(n/max(len(tickers),1),text=f'A analisar {n}/{len(tickers)}')
+        prog.empty()
+        if rows:
+            sdf=add_sector_relative_scores(pd.DataFrame(rows))
+            st.session_state['sector_df']=sdf
+            st.session_state['sector_summary']=sector_summary(sdf)
+        else:
+            st.session_state['sector_df']=pd.DataFrame()
+            st.session_state['sector_summary']=pd.DataFrame()
+
+    sdf=st.session_state.get('sector_df',pd.DataFrame())
+    ssum=st.session_state.get('sector_summary',pd.DataFrame())
+    if not ssum.empty:
+        st.markdown('### Visão geral dos setores')
+        st.dataframe(ssum,use_container_width=True,hide_index=True)
+        st.caption('“Peso no universo analisado” usa apenas a capitalização das empresas carregadas pela app; não é o peso oficial do setor num índice.')
+
+        sectors=sorted([x for x in sdf['Setor'].dropna().unique().tolist() if x!='N/D'])
+        chosen=st.selectbox('Ver ranking de um setor',['Todos']+sectors,key='sector_choice')
+        view=sdf.copy() if chosen=='Todos' else sdf[sdf['Setor']==chosen].copy()
+        if view.empty:
+            st.info('Sem ativos suficientes neste setor.')
+        else:
+            cshort,clong=st.columns(2)
+            with cshort:
+                st.markdown('### Top 10 — curto prazo')
+                short=view.sort_values(['Score curto prazo','Score técnico'],ascending=False,na_position='last').head(10)
+                st.dataframe(short[[
+                    'Ticker XTB','Empresa','Mercado','Setor','Score curto prazo','Score técnico','Técnica',
+                    'Retorno 1M %','Retorno 3M %','RSI','Volume relativo','Passa filtros integrados','Data ref.'
+                ]],use_container_width=True,hide_index=True)
+                st.caption('Curto prazo privilegia tendência técnica, momentum recente e volume. O filtro integrado só marca “Sim” quando técnica e fundamentais também são fortes e os dados são suficientes.')
+            with clong:
+                st.markdown('### Top 10 — longo prazo')
+                long=view.sort_values(['Score longo prazo','Score fundamental'],ascending=False,na_position='last').head(10)
+                st.dataframe(long[[
+                    'Ticker XTB','Empresa','Mercado','Setor','Score longo prazo','Score fundamental','Fundamental/ETF',
+                    'Score avaliação relativa','Retorno 12M %','P/E','Forward P/E','FCF yield %',
+                    'Crescimento receitas %','ROE %','Completude fundamental %','Passa filtros integrados','Data ref.'
+                ]],use_container_width=True,hide_index=True)
+                st.caption('Longo prazo combina qualidade fundamental, avaliação relativa ao próprio setor, tendência de 12 meses e completude dos dados. Avaliação relativa não é um preço-alvo.')
+
+            st.markdown('### Dados completos do setor selecionado')
+            st.dataframe(view.sort_values('Score longo prazo',ascending=False,na_position='last'),use_container_width=True,hide_index=True)
+    else:
+        st.info('Gera a análise para ver os setores e os rankings de curto e longo prazo.')
+
+with TABS[3]:
     st.subheader('Minha carteira')
     st.caption('Introduz preço médio e preço alvo definidos por ti. A app calcula dados atuais e cenários históricos sem inventar um alvo.')
     initial=pd.DataFrame([{'Ticker XTB':'AAPL.US','Quantidade':1.0,'Preço médio':180.0,'Preço alvo':210.0}])
@@ -661,7 +879,7 @@ with TABS[2]:
                 rows.append({'Ticker':t,'Erro':str(e)})
         if rows: st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
 
-with TABS[3]:
+with TABS[4]:
     st.subheader('Top 10 por mercado ou global')
     markets=st.multiselect('Mercados a comparar',list(MARKETS.keys()),default=['EUA','Alemanha','Portugal'],key='topmarkets')
     if st.session_state.watchlist:
@@ -683,7 +901,7 @@ with TABS[3]:
             st.caption('A ordenação usa apenas métricas calculadas. “CANDIDATO A ENTRADA” exige técnica forte + fundamental/ETF forte + dados suficientes.')
         else: st.warning('Sem dados suficientes.')
 
-with TABS[4]:
+with TABS[5]:
     st.subheader('Desempenho histórico da regra técnica')
     bt=st.text_input('Ticker para backtest',value='AAPL.US').upper().strip()
     b1,b2,b3=st.columns(3)
@@ -709,7 +927,7 @@ with TABS[4]:
                 st.caption('Backtest técnico, não inclui análise fundamental histórica ponto-a-ponto. Custos são os valores introduzidos acima.')
         except Exception as e: st.error(str(e))
 
-with TABS[5]:
+with TABS[6]:
     st.subheader('Metodologia e regras de integridade dos dados')
     st.markdown('''
 - **Nenhum número é preenchido por suposição.** Se o fornecedor não disponibilizar um campo, aparece `N/D` ou “dados insuficientes”.
@@ -722,6 +940,10 @@ with TABS[5]:
 - **Identidade do instrumento:** o ticker XTB é a chave principal (ex.: `AAPL.US`, `ASML.NL`, `FB2A.DE`, `EDP.PT`). O ticker técnico serve apenas para obter dados do fornecedor.
 - **Sem substituição silenciosa de bolsa:** se a fonte técnica não tiver o instrumento correspondente, a app devolve erro em vez de trocar para outra praça/moeda.
 - **Fonte atual de séries/fundamentais:** Yahoo Finance via `yfinance`. Para decisões reais, confirma preço, spread, sessão e documentos da empresa/ETF na XTB e nas relações com investidores/regulador.
+- **Análise setorial:** agrega apenas os ativos efetivamente analisados. O peso setorial é relativo a esse universo, não a um índice oficial.
+- **Curto prazo setorial:** score composto de técnica, momentum 1/3 meses e volume relativo; horizonte aproximado de 5–30 dias de mercado.
+- **Longo prazo setorial:** combina qualidade fundamental, avaliação relativa dentro do setor, tendência de 12 meses e completude dos dados; horizonte aproximado de 6–24 meses.
+- **Avaliação relativa:** P/E, Forward P/E, P/B, EV/EBITDA e FCF yield são comparados dentro do setor quando existem pelo menos quatro observações válidas; métricas em falta não são inventadas.
 ''')
 
 
