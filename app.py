@@ -219,7 +219,7 @@ def _supabase_headers():
         headers['Authorization']=f'Bearer {key}'
     return headers
 
-def _supabase_request(method, path, payload=None, extra_headers=None, timeout=12):
+def _supabase_request(method, path, payload=None, extra_headers=None, timeout=4):
     url,_,_=persistence_config()
     if not url:
         raise RuntimeError('SUPABASE_URL não configurado.')
@@ -296,7 +296,8 @@ def load_persistent_state(force=False):
         st.session_state['persistence_status']='Erro'
         st.session_state['persistence_error']=str(e)
 
-load_persistent_state()
+# A persistencia deixa de ser carregada no arranque global.
+# E carregada apenas quando o utilizador abre a pagina Carteira, evitando bloquear a abertura da app.
 
 def add_watchlist(ticker):
     t = str(ticker).upper().strip()
@@ -1696,9 +1697,9 @@ def _top_cards(df, rows, horizon, n=5):
 
 
 st.caption('Modo simples: decisão prática primeiro, 3 evidências interpretadas e detalhe apenas quando pedes.')
-TABS = st.tabs(['Hoje', 'Carteira', 'Analisar'])
+PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Analisar'], horizontal=True, label_visibility='collapsed', key='main_page')
 
-with TABS[0]:
+if PAGE == 'Hoje':
     st.subheader('O que merece atenção hoje?')
     st.markdown('<div class="section-note">Um resumo curto. Curto e longo prazo ficam separados para não misturar estratégias.</div>', unsafe_allow_html=True)
 
@@ -1796,8 +1797,11 @@ with TABS[0]:
     else:
         st.info('Carrega em **Atualizar oportunidades** para gerar o resumo do dia.')
 
-with TABS[1]:
+elif PAGE == 'Carteira':
     st.subheader('Minha carteira')
+    if not st.session_state.get('_persistent_loaded'):
+        with st.spinner('A carregar a carteira guardada...'):
+            load_persistent_state()
     status=st.session_state.get('persistence_status','Apenas sessão')
     if status=='Ligado':
         last=st.session_state.get('persistence_last_save')
@@ -1953,7 +1957,7 @@ APP_PASSWORD = "uma-palavra-passe-forte"
                 cols2=['Ticker XTB','Decisão utilizador','Preço na decisão','Preço atual','Variação desde decisão %','Percurso desde decisão','Regra atual']
                 st.dataframe(h2[[c for c in cols2 if c in h2.columns]],hide_index=True,use_container_width=True)
 
-with TABS[2]:
+elif PAGE == 'Analisar':
     st.subheader('Analisar uma ação ou ETF')
     st.caption('Primeiro uma resposta rápida. Histórico, alvos e prazos só são calculados quando pedires.')
     t1,t2=st.columns([2,1])
