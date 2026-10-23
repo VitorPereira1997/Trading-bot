@@ -5,6 +5,8 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import hmac
+import re
+import unicodedata
 from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
@@ -163,6 +165,10 @@ if 'portfolio_input' not in st.session_state:
     st.session_state.portfolio_input = []
 if 'decision_history' not in st.session_state:
     st.session_state.decision_history = []
+if 'investingpro_data' not in st.session_state:
+    st.session_state.investingpro_data = {}
+if 'investingpro_import_meta' not in st.session_state:
+    st.session_state.investingpro_import_meta = {}
 
 # -----------------------------------------------------------------------------
 # Persistência permanente (Supabase)
@@ -243,6 +249,8 @@ def persistent_state_payload():
     return {
         'portfolio_input':_json_safe(st.session_state.get('portfolio_input',[])),
         'decision_history':_json_safe(st.session_state.get('decision_history',[])),
+        'investingpro_data':_json_safe(st.session_state.get('investingpro_data',{})),
+        'investingpro_import_meta':_json_safe(st.session_state.get('investingpro_import_meta',{})),
     }
 
 def save_persistent_state(show_error=False):
@@ -288,6 +296,8 @@ def load_persistent_state(force=False):
             state=rows[0].get('state') or {}
             st.session_state.portfolio_input=list(state.get('portfolio_input') or [])
             st.session_state.decision_history=list(state.get('decision_history') or [])
+            st.session_state.investingpro_data=dict(state.get('investingpro_data') or {})
+            st.session_state.investingpro_import_meta=dict(state.get('investingpro_import_meta') or {})
             st.session_state['persistence_last_save']=rows[0].get('updated_at')
         st.session_state['persistence_status']='Ligado'
         st.session_state.pop('persistence_error',None)
@@ -393,6 +403,311 @@ def technical_score(row):
 def _num(info, key):
     v = info.get(key)
     return float(v) if isinstance(v, (int,float,np.integer,np.floating)) and np.isfinite(v) else None
+
+
+def _norm_label(value):
+    txt=str(value or '').strip().lower()
+    txt=unicodedata.normalize('NFKD',txt)
+    txt=''.join(ch for ch in txt if not unicodedata.combining(ch))
+    txt=txt.replace('&',' and ').replace('/',' ').replace('\\',' ')
+    txt=re.sub(r'[^a-z0-9%]+',' ',txt)
+    return re.sub(r'\s+',' ',txt).strip()
+
+
+# Campos que a app sabe aproveitar diretamente dos exports do InvestingPro.
+# Os aliases são deliberadamente conservadores para evitar preencher uma métrica
+# com um número de significado diferente.
+_IP_ALIASES = {
+    'revenueGrowth':['revenue growth','sales growth','crescimento receitas','crescimento de receitas'],
+    'earningsGrowth':['earnings growth','net income growth','crescimento lucros','crescimento de lucros'],
+    'operatingMargins':['operating margin','operating margin %','margem operacional'],
+    'profitMargins':['net margin','net profit margin','profit margin','margem liquida','margem de lucro'],
+    'returnOnEquity':['return on equity','roe','roe %','rentabilidade dos capitais proprios'],
+    'freeCashflow':['free cash flow','free cashflow','fcf','fluxo de caixa livre'],
+    'operatingCashflow':['operating cash flow','cash from operations','operating cashflow','fluxo de caixa operacional'],
+    'debtToEquity':['debt to equity','debt equity','debt equity ratio','divida capital proprio','divida patrimonio'],
+    'marketCap':['market cap','market capitalization','capitalizacao bolsista','capitalizacao de mercado'],
+    'trailingPE':['p e','pe ratio','p e ratio','price earnings','price to earnings','preco lucro'],
+    'forwardPE':['forward p e','forward pe','forward p e ratio','p e forward','preco lucro forward'],
+    'priceToBook':['price to book','p b','pb ratio','p b ratio','preco valor contabilistico'],
+    'enterpriseToEbitda':['ev ebitda','enterprise value ebitda','ev to ebitda'],
+    'targetMeanPrice':['analyst target','average target price','mean target price','price target','preco alvo medio','preco alvo'],
+    'numberOfAnalystOpinions':['number of analysts','analysts','analyst count','numero de analistas','n analistas'],
+    'recommendationKey':['analyst consensus','recommendation','recomendacao analistas','consenso analistas'],
+    'sector':['sector','setor'],
+    'industry':['industry','industria'],
+    'currency':['currency','moeda'],
+    'longName':['company','company name','name','empresa'],
+    # Campos exclusivos/complementares do InvestingPro.
+    'investingFcfYield':['fcf yield','free cash flow yield','rendimento fcf','yield fluxo caixa livre'],
+    'investingFairValue':['fair value','investingpro fair value','valor justo','preco justo'],
+    'investingFairValueUpside':['fair value upside','upside to fair value','potencial fair value','potencial valor justo'],
+    'investingHealthScore':['financial health score','health score','financial health','saude financeira','pontuacao saude financeira'],
+}
+
+_IP_TICKER_ALIASES={
+    'ticker','ticker symbol','symbol','simbolo','codigo','code','instrument','instrumento','security','acao','stock'
+}
+
+_IP_FRACTION_FIELDS={'revenueGrowth','earningsGrowth','operatingMargins','profitMargins','returnOnEquity'}
+_IP_ABSOLUTE_FIELDS={'freeCashflow','operatingCashflow','marketCap','targetMeanPrice','investingFairValue'}
+_IP_NUMERIC_FIELDS=set(_IP_ALIASES)-{'recommendationKey','sector','industry','currency','longName'}
+
+
+def _metric_from_label(label):
+    n=_norm_label(label)
+    if not n:
+        return None
+    candidates=[]
+    for key,aliases in _IP_ALIASES.items():
+        for alias in aliases:
+            a=_norm_label(alias)
+            candidates.append((len(a),key,a))
+    # Prioriza aliases mais específicos: "forward p e" antes de "p e".
+    for _,key,a in sorted(candidates,reverse=True):
+        if n==a or n.startswith(a+' ') or n.endswith(' '+a):
+            return key
+    return None
+
+
+def _clean_ticker_value(value):
+    t=str(value or '').strip().upper()
+    if not t or t in {'NAN','NONE','N/D'}:
+        return ''
+    # Formatos comuns: NASDAQ:NVDA, NASDAQ - NVDA, NVDA (NASDAQ).
+    if ':' in t:
+        parts=[x.strip() for x in t.split(':') if x.strip()]
+        if len(parts)>=2 and len(parts[-1])<=12:
+            t=parts[-1]
+    t=re.sub(r'\s*\([^)]*\)\s*$','',t).strip()
+    return t
+
+
+def _parse_ip_number(value, key=None, label=''):
+    if value is None or (isinstance(value,float) and not np.isfinite(value)):
+        return None
+    if isinstance(value,(int,float,np.integer,np.floating)):
+        x=float(value)
+        raw=''
+    else:
+        raw=str(value).strip()
+        if not raw or raw.lower() in {'n/a','na','nan','none','-','--','n/d'}:
+            return None
+        neg=raw.startswith('(') and raw.endswith(')')
+        txt=raw.strip('()').replace('\xa0',' ').replace('€','').replace('$','').replace('£','')
+        multiplier=1.0
+        m=re.search(r'([kmbt])\s*$',txt.strip(),flags=re.I)
+        if m:
+            multiplier={'k':1e3,'m':1e6,'b':1e9,'t':1e12}[m.group(1).lower()]
+            txt=txt[:m.start()].strip()
+        txt=txt.replace('x','').replace('X','').replace('%','').strip()
+        # Resolve decimal comma / thousands separators conservatively.
+        if ',' in txt and '.' in txt:
+            if txt.rfind(',') > txt.rfind('.'):
+                txt=txt.replace('.','').replace(',','.')
+            else:
+                txt=txt.replace(',','')
+        elif ',' in txt:
+            if re.search(r',\d{1,3}$',txt):
+                txt=txt.replace('.','').replace(',','.')
+            else:
+                txt=txt.replace(',','')
+        txt=re.sub(r'[^0-9eE+\-.]','',txt)
+        try:
+            x=float(txt)*multiplier
+        except Exception:
+            return None
+        if neg:
+            x=-x
+    if not np.isfinite(x):
+        return None
+    nlabel=_norm_label(label)
+    if key in _IP_FRACTION_FIELDS:
+        # A Yahoo usa frações (0.15 = 15%). InvestingPro normalmente mostra %.
+        if '%' in str(value) or '%' in str(label) or abs(x)>2:
+            x=x/100.0
+    elif key=='debtToEquity':
+        # A Yahoo representa 75% como 75. InvestingPro pode exportar 0.75x.
+        if '%' not in str(value) and '%' not in str(label) and abs(x)<=10:
+            x=x*100.0
+    elif key=='investingFairValueUpside':
+        # Guardamos este campo em percentagem, não em fração.
+        if abs(x)<=2 and '%' not in str(value) and '%' not in str(label):
+            x=x*100.0
+    return float(x)
+
+
+def _ticker_lookup_keys(xtb_ticker, source_ticker=None):
+    vals=[]
+    for raw in [xtb_ticker,source_ticker]:
+        t=_clean_ticker_value(raw)
+        if not t:
+            continue
+        vals.append(t)
+        if '.' in t:
+            vals.append(t.split('.')[0])
+    return list(dict.fromkeys(vals))
+
+
+def _lookup_investingpro_record(xtb_ticker, source_ticker=None):
+    db=st.session_state.get('investingpro_data',{}) or {}
+    for key in _ticker_lookup_keys(xtb_ticker,source_ticker):
+        rec=db.get(key)
+        if isinstance(rec,dict):
+            return rec
+    return None
+
+
+def _value_available(v):
+    if v is None:
+        return False
+    if isinstance(v,(int,float,np.integer,np.floating)):
+        return bool(np.isfinite(float(v)))
+    return bool(str(v).strip() and str(v).strip().upper() not in {'N/D','N/A','NONE','NAN'})
+
+
+def _enrich_info_with_investingpro(base_info, xtb_ticker, source_ticker):
+    info=dict(base_info or {})
+    tracked=set(_IP_ALIASES)
+    sources={k:'Yahoo' for k in tracked if _value_available(info.get(k))}
+    rec=_lookup_investingpro_record(xtb_ticker,source_ticker)
+    if rec:
+        metrics=rec.get('metrics') or {}
+        for key,val in metrics.items():
+            if key not in tracked or not _value_available(val):
+                continue
+            if not _value_available(info.get(key)):
+                info[key]=val
+                sources[key]='InvestingPro'
+        # Campos exclusivos do InvestingPro não existem normalmente na Yahoo.
+        for key in ['investingFcfYield','investingFairValue','investingFairValueUpside','investingHealthScore']:
+            if _value_available(metrics.get(key)):
+                info[key]=metrics.get(key)
+                sources[key]='InvestingPro'
+    return info,sources,rec
+
+
+def _read_investingpro_upload(uploaded):
+    name=str(getattr(uploaded,'name','')).lower()
+    uploaded.seek(0)
+    if name.endswith('.xlsx'):
+        book=pd.read_excel(uploaded,sheet_name=None,engine='openpyxl')
+        return [(str(k),v) for k,v in book.items() if isinstance(v,pd.DataFrame) and not v.empty]
+    # sep=None reconhece CSV com vírgula ou ponto e vírgula.
+    try:
+        df=pd.read_csv(uploaded,sep=None,engine='python')
+    except Exception:
+        uploaded.seek(0)
+        df=pd.read_csv(uploaded)
+    return [('CSV',df)] if isinstance(df,pd.DataFrame) and not df.empty else []
+
+
+def _extract_ip_from_wide_df(df, ticker_hint=''):
+    if df is None or df.empty:
+        return {},0
+    norm_cols={c:_norm_label(c) for c in df.columns}
+    ticker_col=next((c for c,n in norm_cols.items() if n in _IP_TICKER_ALIASES),None)
+    metric_cols={c:_metric_from_label(c) for c in df.columns}
+    metric_cols={c:k for c,k in metric_cols.items() if k}
+    if not metric_cols:
+        return {},0
+    out={}; recognized=0
+    for _,row in df.iterrows():
+        ticker=_clean_ticker_value(row.get(ticker_col)) if ticker_col else _clean_ticker_value(ticker_hint)
+        if not ticker:
+            continue
+        metrics={}
+        for col,key in metric_cols.items():
+            raw=row.get(col)
+            if key in _IP_NUMERIC_FIELDS:
+                val=_parse_ip_number(raw,key,col)
+            else:
+                val=str(raw).strip() if _value_available(raw) else None
+            if _value_available(val):
+                metrics[key]=val
+                recognized+=1
+        if metrics:
+            out[ticker]={
+                'metrics':metrics,
+                'source':'InvestingPro import',
+                'imported_at':datetime.now(timezone.utc).isoformat(),
+            }
+    return out,recognized
+
+
+def _extract_ip_from_long_df(df, ticker_hint=''):
+    # Suporta exports simples "Métrica | Valor" de uma única empresa.
+    ticker=_clean_ticker_value(ticker_hint)
+    if not ticker or df is None or df.empty or len(df.columns)<2:
+        return {},0
+    best_metrics={}; best_count=0
+    for metric_col in df.columns:
+        mapped=[_metric_from_label(x) for x in df[metric_col].astype(str).tolist()]
+        if sum(x is not None for x in mapped)<2:
+            continue
+        other_cols=[c for c in df.columns if c!=metric_col]
+        for value_col in reversed(other_cols):
+            metrics={}; count=0
+            for (_,r),key in zip(df.iterrows(),mapped):
+                if not key:
+                    continue
+                raw=r.get(value_col)
+                val=_parse_ip_number(raw,key,str(r.get(metric_col))) if key in _IP_NUMERIC_FIELDS else (str(raw).strip() if _value_available(raw) else None)
+                if _value_available(val):
+                    metrics[key]=val; count+=1
+            if count>best_count:
+                best_metrics=metrics; best_count=count
+    if not best_metrics:
+        return {},0
+    return {ticker:{'metrics':best_metrics,'source':'InvestingPro import','imported_at':datetime.now(timezone.utc).isoformat()}},best_count
+
+
+def parse_investingpro_file(uploaded, ticker_hint=''):
+    records={}; recognized=0; sheets=[]
+    for sheet,df in _read_investingpro_upload(uploaded):
+        sheets.append(sheet)
+        wide,n1=_extract_ip_from_wide_df(df,ticker_hint)
+        long,n2=({},0) if wide else _extract_ip_from_long_df(df,ticker_hint)
+        for batch in [wide,long]:
+            for ticker,rec in batch.items():
+                old=records.get(ticker,{'metrics':{},'source':'InvestingPro import','imported_at':rec.get('imported_at')})
+                old['metrics'].update(rec.get('metrics') or {})
+                records[ticker]=old
+        recognized += n1+n2
+    return records,recognized,sheets
+
+
+def merge_investingpro_records(records):
+    db=dict(st.session_state.get('investingpro_data',{}) or {})
+    for ticker,rec in (records or {}).items():
+        t=_clean_ticker_value(ticker)
+        if not t:
+            continue
+        current=db.get(t,{'metrics':{},'source':'InvestingPro import'})
+        current['metrics']=dict(current.get('metrics') or {})
+        current['metrics'].update(rec.get('metrics') or {})
+        current['source']='InvestingPro import'
+        current['imported_at']=rec.get('imported_at') or datetime.now(timezone.utc).isoformat()
+        db[t]=current
+    st.session_state.investingpro_data=db
+    st.session_state.investingpro_import_meta={
+        'updated_at':datetime.now(timezone.utc).isoformat(),
+        'tickers':len(db),
+    }
+    return len(db)
+
+
+def _source_for(a,key,default='N/D'):
+    return str((a.get('data_sources') or {}).get(key) or default)
+
+
+def _sources_summary(a, keys):
+    vals=[]
+    for key in keys:
+        src=(a.get('data_sources') or {}).get(key)
+        if src and src not in vals:
+            vals.append(src)
+    return ' + '.join(vals) if vals else 'N/D'
 
 def _metric_score(value, bad, good, higher_better=True):
     if value is None or not np.isfinite(value):
@@ -612,14 +927,15 @@ def asset_kind(info):
     qt = str(info.get('quoteType','')).upper()
     return 'ETF' if qt == 'ETF' else 'Ação'
 
-def fundamental_analysis(ticker):
-    info = asset_info(ticker)
+def fundamental_analysis(ticker, xtb_ticker=None):
+    base_info = asset_info(ticker)
+    info, data_sources, ip_record = _enrich_info_with_investingpro(base_info, xtb_ticker or ticker, ticker)
     kind = asset_kind(info)
     if kind == 'ETF':
         label, score, completeness, table = fundamental_etf(info)
     else:
         label, score, completeness, table = fundamental_equity(info)
-    return info, kind, label, score, completeness, table
+    return info, kind, label, score, completeness, table, data_sources, ip_record
 
 def historical_scenarios(raw, current_row, horizons=(5,10,15,30)):
     d = indicators(raw).dropna().copy()
@@ -734,7 +1050,7 @@ def analyze_asset(ticker, market_hint=None, detailed=True):
         raise ValueError('Histórico insuficiente para análise técnica robusta.')
     row=d.iloc[-1]
     tech_score, tech_label, tech_tests=technical_score(row)
-    info,kind,fund_label,fund_score,complete,fund_table=fundamental_analysis(source)
+    info,kind,fund_label,fund_score,complete,fund_table,data_sources,ip_record=fundamental_analysis(source,ident['xtb_ticker'])
     entry,stop,target=entry_levels(row)
     scenarios=historical_scenarios(raw,row) if detailed else pd.DataFrame()
     target_time=target_time_stats(raw,row,target,max_days=60) if detailed else {'median_days':None,'hit_rate':None,'samples':0,'hits':0,'move_pct':None}
@@ -754,7 +1070,7 @@ def analyze_asset(ticker, market_hint=None, detailed=True):
         'raw':raw,'df':d,'row':row,'tech_score':tech_score,'tech_label':tech_label,'tech_tests':tech_tests,
         'info':info,'kind':kind,'fund_label':fund_label,'fund_score':fund_score,'fund_complete':complete,
         'fund_table':fund_table,'entry':entry,'stop':stop,'target':target,'scenarios':scenarios,
-        'target_time':target_time
+        'target_time':target_time,'data_sources':data_sources,'investingpro_record':ip_record
     }
 
 def decision(a):
@@ -1038,6 +1354,12 @@ def source_block(ticker, a):
         st.info(f"Símbolo introduzido: {a['requested_ticker']} → identidade XTB usada: {xtb} → ticker técnico: {source}.")
     elif xtb != source:
         st.info(f"Ticker XTB: {xtb} → ticker técnico usado apenas para dados: {source}. A identidade da posição continua a ser {xtb}.")
+    used=[]
+    for src in (a.get('data_sources') or {}).values():
+        if src and src not in used:
+            used.append(src)
+    if used:
+        st.caption('Fontes fundamentais efetivamente usadas: '+ ' + '.join(used) + '. Yahoo é principal; InvestingPro apenas preenche campos ausentes.')
     st.markdown(f'[Abrir fonte técnica de {source}]({url})')
 
 
@@ -1842,7 +2164,14 @@ def _comparison_rows(analyses):
         short_action,short_score=_short_action(a,holding=False)
         long_action,long_score=_long_action(a,holding=False)
         fcf=_num(info,'freeCashflow'); market_cap=_num(info,'marketCap')
-        fcf_yield=(fcf/market_cap*100) if fcf is not None and market_cap and market_cap>0 else None
+        fcf_yield=_num(info,'investingFcfYield')
+        if fcf_yield is None:
+            fcf_yield=(fcf/market_cap*100) if fcf is not None and market_cap and market_cap>0 else None
+        fair_value=_num(info,'investingFairValue')
+        fair_upside=_num(info,'investingFairValueUpside')
+        if fair_upside is None and fair_value is not None and price>0:
+            fair_upside=(fair_value/price-1)*100
+        health_score=_num(info,'investingHealthScore')
         cons=analyst_consensus(info,price) if a['kind']=='Ação' else {
             'Preço alvo médio consenso':None,'Nº analistas':None,'Potencial consenso %':None
         }
@@ -1868,6 +2197,18 @@ def _comparison_rows(analyses):
             'Forward P/E':_num(info,'forwardPE'),
             'P/B':_num(info,'priceToBook'),
             'EV/EBITDA':_num(info,'enterpriseToEbitda'),
+            'Fair Value InvestingPro':fair_value,
+            'Potencial Fair Value %':fair_upside,
+            'Saúde financeira InvestingPro':health_score,
+            'Fonte qualidade':_sources_summary(a,['revenueGrowth','earningsGrowth','operatingMargins','profitMargins','returnOnEquity','freeCashflow','operatingCashflow','debtToEquity']),
+            'Fonte avaliação':_sources_summary(a,['trailingPE','forwardPE','priceToBook','enterpriseToEbitda','freeCashflow','marketCap','investingFcfYield']),
+            'Fonte ROE':_source_for(a,'returnOnEquity'),
+            'Fonte FCF':_source_for(a,'freeCashflow'),
+            'Fonte P/E':_source_for(a,'trailingPE'),
+            'Fonte Forward P/E':_source_for(a,'forwardPE'),
+            'Fonte P/B':_source_for(a,'priceToBook'),
+            'Fonte EV/EBITDA':_source_for(a,'enterpriseToEbitda'),
+            'Fonte analistas':_sources_summary(a,['targetMeanPrice','numberOfAnalystOpinions','recommendationKey']),
             'Técnica':a['tech_label'],
             'Score técnico':a['tech_score'],
             'RSI':float(row['RSI14']),
@@ -2229,6 +2570,50 @@ elif PAGE == 'Comparar':
     st.subheader('Comparador de ações')
     st.caption('Compara 2 a 4 ações lado a lado. Primeiro a conclusão; depois os números que a justificam.')
 
+    # Carrega também o cache InvestingPro persistido, mas apenas quando o utilizador
+    # entra no comparador; não volta a atrasar o arranque global da app.
+    if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
+        with st.spinner('A carregar fontes complementares guardadas...'):
+            load_persistent_state()
+
+    with st.expander('📥 InvestingPro · fonte complementar (opcional)'):
+        ip_db=st.session_state.get('investingpro_data',{}) or {}
+        if ip_db:
+            total_metrics=sum(len((r or {}).get('metrics') or {}) for r in ip_db.values())
+            st.success(f'Dados InvestingPro guardados: {len(ip_db)} ticker(s) · {total_metrics} métricas reconhecidas.')
+        else:
+            st.info('Ainda não há dados InvestingPro importados. A app continua a funcionar apenas com Yahoo Finance.')
+        st.caption('Exporta uma vista/tabela do InvestingPro em CSV ou Excel. A app usa estes dados só para preencher campos que estejam em falta na Yahoo.')
+        ip_file=st.file_uploader('CSV ou Excel do InvestingPro',type=['csv','xlsx'],key='ip_upload')
+        ip_hint=st.text_input('Ticker XTB se o ficheiro for de uma única empresa (opcional)',placeholder='Ex.: AMD.US',key='ip_ticker_hint')
+        ib1,ib2=st.columns(2)
+        with ib1:
+            if st.button('Importar InvestingPro',use_container_width=True,key='ip_import',disabled=ip_file is None):
+                try:
+                    recs,recognized,sheets=parse_investingpro_file(ip_file,ip_hint)
+                    if not recs or recognized<=0:
+                        st.error('Não reconheci métricas úteis neste ficheiro. Tenta exportar uma tabela com ticker/símbolo e colunas como ROE, P/E, EV/EBITDA, crescimento, margens, FCF ou Fair Value.')
+                    else:
+                        total=merge_investingpro_records(recs)
+                        st.session_state.pop('comparison_df',None)
+                        st.session_state.pop('v14_analysis',None)
+                        saved=save_persistent_state(show_error=False) if persistence_enabled() else False
+                        msg=f'Importadas {recognized} métricas para {len(recs)} ticker(s). Total guardado: {total} ticker(s).'
+                        if persistence_enabled():
+                            msg += ' Guardado no Supabase.' if saved else ' Ficou nesta sessão; o Supabase não confirmou a gravação.'
+                        st.success(msg)
+                except Exception as e:
+                    st.error(f'Não foi possível importar o ficheiro: {e}')
+        with ib2:
+            if st.button('Limpar dados InvestingPro',use_container_width=True,key='ip_clear',disabled=not bool(ip_db)):
+                st.session_state.investingpro_data={}
+                st.session_state.investingpro_import_meta={}
+                st.session_state.pop('comparison_df',None)
+                if persistence_enabled():
+                    save_persistent_state(show_error=False)
+                st.success('Dados InvestingPro removidos da app.')
+                st.rerun()
+
     c1,c2=st.columns(2)
     with c1:
         cmp1=st.text_input('1 · Ticker XTB',value='AAPL.US',key='cmp_1',placeholder='Ex.: AAPL.US')
@@ -2315,15 +2700,15 @@ elif PAGE == 'Comparar':
         overview=cdf[['Ticker','Empresa','Setor','Preço','Moeda','Score qualidade','Score avaliação comparada','Score entrada','Score equilíbrio geral','Curto prazo','Longo prazo']].copy()
         st.dataframe(overview,hide_index=True,use_container_width=True)
 
-        tq,tv,te,ta=st.tabs(['Qualidade','Avaliação','Entrada','Analistas'])
+        tq,tv,te,ta,ts=st.tabs(['Qualidade','Avaliação','Entrada','Analistas','Fontes'])
         with tq:
             cols=['Ticker','Qualidade','Score qualidade','Dados fundamentais %','Crescimento receitas %','Crescimento lucros %','Margem operacional %','Margem líquida %','ROE %','FCF yield %','Dívida/Capital próprio %']
             st.dataframe(cdf[[c for c in cols if c in cdf.columns]],hide_index=True,use_container_width=True)
             st.caption('A qualidade usa critérios ajustados ao setor. Dívida não é tratada da mesma forma numa financeira e numa tecnológica.')
         with tv:
-            cols=['Ticker','Score avaliação comparada','P/E','Forward P/E','P/B','EV/EBITDA','FCF yield %']
+            cols=['Ticker','Score avaliação comparada','P/E','Forward P/E','P/B','EV/EBITDA','FCF yield %','Fair Value InvestingPro','Potencial Fair Value %','Saúde financeira InvestingPro']
             st.dataframe(cdf[[c for c in cols if c in cdf.columns]],hide_index=True,use_container_width=True)
-            st.caption('“Mais barata” aqui significa melhor avaliação relativa entre as selecionadas; não é um cálculo de valor justo intrínseco.')
+            st.caption('“Mais barata” aqui significa melhor avaliação relativa entre as selecionadas. Fair Value e Saúde financeira só aparecem quando foram importados do InvestingPro; não substituem a análise da app.')
         with te:
             cols=['Ticker','Técnica','Score técnico','RSI','Retorno 20d %','Retorno 60d %','Curto prazo','Score entrada']
             st.dataframe(cdf[[c for c in cols if c in cdf.columns]],hide_index=True,use_container_width=True)
@@ -2334,6 +2719,10 @@ elif PAGE == 'Comparar':
             cols=['Ticker','Recomendação analistas','Alvo médio analistas','Potencial analistas %','Nº analistas']
             st.dataframe(cdf[[c for c in cols if c in cdf.columns]],hide_index=True,use_container_width=True)
             st.caption('O consenso dos analistas é informação externa e pode mudar; não substitui a análise fundamental nem garante retorno.')
+        with ts:
+            cols=['Ticker','Fonte qualidade','Fonte avaliação','Fonte ROE','Fonte FCF','Fonte P/E','Fonte Forward P/E','Fonte P/B','Fonte EV/EBITDA','Fonte analistas']
+            st.dataframe(cdf[[c for c in cols if c in cdf.columns]],hide_index=True,use_container_width=True)
+            st.caption('Yahoo é a fonte principal. InvestingPro só preenche campos ausentes; a app não substitui silenciosamente um valor Yahoo existente.')
 
         st.markdown('### Veredito por ação')
         for _,r in cdf.sort_values('Score equilíbrio geral',ascending=False,na_position='last').iterrows():
@@ -2419,5 +2808,6 @@ with st.expander('Como ler a app'):
 - **AGUARDAR** é uma decisão válida; a app não força uma compra.
 - **Alvo técnico (2× risco)** não é um valor justo fundamental.
 - Prazo e cenários são comparações históricas, não previsões.
-- A fonte atual é Yahoo Finance via `yfinance`; confirma preço, spread, sessão e informação oficial antes de executar uma ordem.
+- **Fontes**: Yahoo Finance é a fonte principal; dados InvestingPro importados servem apenas de fallback para campos em falta e aparecem identificados.
+- Confirma preço, spread, sessão e informação oficial antes de executar uma ordem.
 ''')
