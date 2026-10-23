@@ -390,32 +390,193 @@ def _num(info, key):
     v = info.get(key)
     return float(v) if isinstance(v, (int,float,np.integer,np.floating)) and np.isfinite(v) else None
 
+def _metric_score(value, bad, good, higher_better=True):
+    if value is None or not np.isfinite(value):
+        return None
+    v=float(value)
+    if higher_better:
+        if good <= bad:
+            return None
+        return max(0.0,min(100.0,(v-bad)/(good-bad)*100.0))
+    if bad <= good:
+        return None
+    return max(0.0,min(100.0,(bad-v)/(bad-good)*100.0))
+
+
+def _sector_fundamental_profile(info):
+    sector=str(info.get('sector') or 'Other')
+    base={
+        'revenueGrowth':      {'weight':0.14,'bad':-0.05,'good':0.15,'higher':True},
+        'earningsGrowth':     {'weight':0.12,'bad':-0.10,'good':0.20,'higher':True},
+        'operatingMargins':   {'weight':0.12,'bad':0.03,'good':0.20,'higher':True},
+        'profitMargins':      {'weight':0.10,'bad':0.02,'good':0.15,'higher':True},
+        'returnOnEquity':     {'weight':0.18,'bad':0.03,'good':0.20,'higher':True},
+        'freeCashflow':       {'weight':0.14,'binary_positive':True},
+        'operatingCashflow':  {'weight':0.08,'binary_positive':True},
+        'debtToEquity':       {'weight':0.12,'bad':200.0,'good':50.0,'higher':False},
+    }
+    overrides={
+        'Technology': {
+            'revenueGrowth':{'weight':0.18,'bad':-0.03,'good':0.20,'higher':True},
+            'earningsGrowth':{'weight':0.14,'bad':-0.08,'good':0.22,'higher':True},
+            'operatingMargins':{'weight':0.14,'bad':0.05,'good':0.25,'higher':True},
+            'profitMargins':{'weight':0.12,'bad':0.03,'good':0.20,'higher':True},
+            'returnOnEquity':{'weight':0.18,'bad':0.05,'good':0.25,'higher':True},
+            'freeCashflow':{'weight':0.12,'binary_positive':True},
+            'operatingCashflow':{'weight':0.06,'binary_positive':True},
+            'debtToEquity':{'weight':0.06,'bad':150.0,'good':30.0,'higher':False},
+        },
+        'Financial Services': {
+            'revenueGrowth':{'weight':0.15,'bad':-0.03,'good':0.12,'higher':True},
+            'earningsGrowth':{'weight':0.20,'bad':-0.10,'good':0.18,'higher':True},
+            'operatingMargins':{'weight':0.00,'bad':0.00,'good':1.00,'higher':True},
+            'profitMargins':{'weight':0.15,'bad':0.04,'good':0.25,'higher':True},
+            'returnOnEquity':{'weight':0.35,'bad':0.05,'good':0.18,'higher':True},
+            'freeCashflow':{'weight':0.00,'binary_positive':True},
+            'operatingCashflow':{'weight':0.15,'binary_positive':True},
+            'debtToEquity':{'weight':0.00,'bad':1000.0,'good':0.0,'higher':False},
+        },
+        'Utilities': {
+            'revenueGrowth':{'weight':0.10,'bad':-0.04,'good':0.08,'higher':True},
+            'earningsGrowth':{'weight':0.10,'bad':-0.10,'good':0.12,'higher':True},
+            'operatingMargins':{'weight':0.15,'bad':0.08,'good':0.25,'higher':True},
+            'profitMargins':{'weight':0.10,'bad':0.04,'good':0.15,'higher':True},
+            'returnOnEquity':{'weight':0.15,'bad':0.03,'good':0.12,'higher':True},
+            'freeCashflow':{'weight':0.15,'binary_positive':True},
+            'operatingCashflow':{'weight':0.10,'binary_positive':True},
+            'debtToEquity':{'weight':0.15,'bad':320.0,'good':100.0,'higher':False},
+        },
+        'Real Estate': {
+            'revenueGrowth':{'weight':0.15,'bad':-0.04,'good':0.10,'higher':True},
+            'earningsGrowth':{'weight':0.10,'bad':-0.12,'good':0.12,'higher':True},
+            'operatingMargins':{'weight':0.15,'bad':0.08,'good':0.30,'higher':True},
+            'profitMargins':{'weight':0.15,'bad':0.04,'good':0.25,'higher':True},
+            'returnOnEquity':{'weight':0.10,'bad':0.02,'good':0.10,'higher':True},
+            'freeCashflow':{'weight':0.10,'binary_positive':True},
+            'operatingCashflow':{'weight':0.10,'binary_positive':True},
+            'debtToEquity':{'weight':0.15,'bad':260.0,'good':80.0,'higher':False},
+        },
+        'Energy': {
+            'revenueGrowth':{'weight':0.08,'bad':-0.12,'good':0.12,'higher':True},
+            'earningsGrowth':{'weight':0.10,'bad':-0.20,'good':0.20,'higher':True},
+            'operatingMargins':{'weight':0.12,'bad':0.04,'good':0.22,'higher':True},
+            'profitMargins':{'weight':0.10,'bad':0.02,'good':0.15,'higher':True},
+            'returnOnEquity':{'weight':0.15,'bad':0.04,'good':0.18,'higher':True},
+            'freeCashflow':{'weight':0.20,'binary_positive':True},
+            'operatingCashflow':{'weight':0.10,'binary_positive':True},
+            'debtToEquity':{'weight':0.15,'bad':180.0,'good':40.0,'higher':False},
+        },
+        'Basic Materials': {
+            'revenueGrowth':{'weight':0.08,'bad':-0.12,'good':0.12,'higher':True},
+            'earningsGrowth':{'weight':0.10,'bad':-0.20,'good':0.20,'higher':True},
+            'operatingMargins':{'weight':0.12,'bad':0.04,'good':0.20,'higher':True},
+            'profitMargins':{'weight':0.10,'bad':0.02,'good':0.14,'higher':True},
+            'returnOnEquity':{'weight':0.15,'bad':0.04,'good':0.18,'higher':True},
+            'freeCashflow':{'weight':0.20,'binary_positive':True},
+            'operatingCashflow':{'weight':0.10,'binary_positive':True},
+            'debtToEquity':{'weight':0.15,'bad':180.0,'good':40.0,'higher':False},
+        },
+        'Healthcare': {
+            'revenueGrowth':{'weight':0.17,'bad':-0.04,'good':0.18,'higher':True},
+            'earningsGrowth':{'weight':0.13,'bad':-0.10,'good':0.20,'higher':True},
+            'operatingMargins':{'weight':0.13,'bad':0.04,'good':0.22,'higher':True},
+            'profitMargins':{'weight':0.12,'bad':0.02,'good':0.18,'higher':True},
+            'returnOnEquity':{'weight':0.15,'bad':0.04,'good':0.20,'higher':True},
+            'freeCashflow':{'weight':0.15,'binary_positive':True},
+            'operatingCashflow':{'weight':0.07,'binary_positive':True},
+            'debtToEquity':{'weight':0.08,'bad':180.0,'good':40.0,'higher':False},
+        },
+    }
+    cfg={k:dict(v) for k,v in base.items()}
+    for k,v in overrides.get(sector,{}).items():
+        cfg[k]=dict(v)
+    roe_floor={
+        'Technology':0.10,'Financial Services':0.08,'Utilities':0.06,'Real Estate':0.04,
+        'Energy':0.07,'Basic Materials':0.07,'Healthcare':0.08,
+    }.get(sector,0.08)
+    debt_critical={
+        'Utilities':380.0,'Real Estate':320.0,'Financial Services':None,
+        'Technology':200.0,'Energy':240.0,'Basic Materials':240.0,
+    }.get(sector,260.0)
+    return sector,cfg,roe_floor,debt_critical
+
+
 def fundamental_equity(info):
-    # Critérios transparentes; dados em falta não contam como aprovados nem reprovados.
-    specs = [
-        ('Crescimento receitas > 0', 'revenueGrowth', lambda x: x > 0),
-        ('Crescimento lucros > 0', 'earningsGrowth', lambda x: x > 0),
-        ('Margem operacional > 10%', 'operatingMargins', lambda x: x > 0.10),
-        ('Margem líquida > 8%', 'profitMargins', lambda x: x > 0.08),
-        ('ROE > 10%', 'returnOnEquity', lambda x: x > 0.10),
-        ('Fluxo de caixa livre positivo', 'freeCashflow', lambda x: x > 0),
-        ('Caixa operacional positivo', 'operatingCashflow', lambda x: x > 0),
-        ('Dívida/Capital próprio < 150%', 'debtToEquity', lambda x: x < 150),
-    ]
+    # Sector-aware weighted score. Missing data reduce completeness but are never invented.
+    sector,cfg,roe_floor,debt_critical=_sector_fundamental_profile(info)
+    labels={
+        'revenueGrowth':'Crescimento de receitas',
+        'earningsGrowth':'Crescimento de lucros',
+        'operatingMargins':'Margem operacional',
+        'profitMargins':'Margem liquida',
+        'returnOnEquity':'ROE',
+        'freeCashflow':'Fluxo de caixa livre',
+        'operatingCashflow':'Caixa operacional',
+        'debtToEquity':'Divida/Capital proprio',
+    }
     rows=[]
-    passed=0
-    available=0
-    for name,key,fn in specs:
-        v=_num(info,key)
-        ok=None if v is None else bool(fn(v))
-        if v is not None:
-            available += 1
-            passed += int(ok)
-        rows.append({'Critério':name,'Valor':v,'Cumpre':('Sim' if ok else 'Não') if ok is not None else 'N/D'})
-    completeness = available/len(specs)*100
-    ratio = passed/available if available else 0
-    label = 'Dados insuficientes' if available < 5 else ('Forte' if ratio >= 0.70 else ('Neutro' if ratio >= 0.45 else 'Fraco'))
-    return label, round(ratio*100,1) if available else None, round(completeness,1), pd.DataFrame(rows)
+    weighted=0.0
+    available_weight=0.0
+    total_weight=sum(float(v.get('weight',0)) for v in cfg.values())
+    metric_scores={}
+    for key,spec in cfg.items():
+        weight=float(spec.get('weight',0))
+        if weight<=0:
+            continue
+        value=_num(info,key)
+        score=None
+        if value is not None:
+            if spec.get('binary_positive'):
+                score=100.0 if value>0 else 0.0
+            else:
+                score=_metric_score(value,float(spec['bad']),float(spec['good']),bool(spec.get('higher',True)))
+        if score is not None:
+            weighted += score*weight
+            available_weight += weight
+            metric_scores[key]=score
+        if score is None:
+            reading='N/D'
+        elif score>=70:
+            reading='Forte para o setor'
+        elif score>=40:
+            reading='Intermedio para o setor'
+        else:
+            reading='Fraco para o setor'
+        rows.append({
+            'Criterio':labels.get(key,key),'Valor':value,'Peso %':round(weight*100,1),
+            'Score setorial':round(score,1) if score is not None else None,'Leitura':reading,
+        })
+    completeness=(available_weight/total_weight*100.0) if total_weight>0 else 0.0
+    score=(weighted/available_weight) if available_weight>0 else None
+    notes=[]
+    roe=_num(info,'returnOnEquity')
+    if score is not None and roe is not None and roe<roe_floor and cfg.get('returnOnEquity',{}).get('weight',0)>=0.10:
+        score=min(score,69.0)
+        notes.append('ROE baixo para o setor')
+    fcf=_num(info,'freeCashflow')
+    if score is not None and fcf is not None and fcf<0 and cfg.get('freeCashflow',{}).get('weight',0)>=0.10:
+        score=min(score,64.0)
+        notes.append('FCF negativo')
+    de=_num(info,'debtToEquity')
+    if score is not None and debt_critical is not None and de is not None and de>debt_critical and cfg.get('debtToEquity',{}).get('weight',0)>0:
+        score=min(score,64.0)
+        notes.append('endividamento elevado para o setor')
+    rg=_num(info,'revenueGrowth'); eg=_num(info,'earningsGrowth')
+    if score is not None and rg is not None and eg is not None and rg<0 and eg<0:
+        score=min(score,59.0)
+        notes.append('receitas e lucros em contracao')
+    if rows and notes:
+        rows.append({'Criterio':'Alertas de qualidade','Valor':None,'Peso %':0.0,'Score setorial':None,'Leitura':' · '.join(notes)})
+    if score is None or completeness<45:
+        label='Dados insuficientes'
+    elif score>=72:
+        label='Forte'
+    elif score>=48:
+        label='Neutro'
+    else:
+        label='Fraco'
+    return label, round(score,1) if score is not None else None, round(completeness,1), pd.DataFrame(rows)
+
 
 def fundamental_etf(info):
     specs=[]
@@ -1130,10 +1291,14 @@ def _quick_scores(a):
 
     fund=a.get('fund_score')
     comp=float(a.get('fund_complete') or 0)
+    peer_quality=a.get('peer_quality_score')
+    peer_valuation=a.get('peer_valuation_score')
     long_parts=[]
-    if fund is not None: long_parts.append((float(fund),0.65))
-    long_parts.append((tech,0.20))
-    long_parts.append((comp,0.15))
+    if fund is not None: long_parts.append((float(fund),0.50))
+    if peer_quality is not None: long_parts.append((float(peer_quality),0.18))
+    if peer_valuation is not None: long_parts.append((float(peer_valuation),0.10))
+    long_parts.append((tech,0.12))
+    long_parts.append((comp,0.10))
     long_score=sum(v*w for v,w in long_parts)/sum(w for _,w in long_parts) if long_parts else None
     return round(short_score,1), (round(long_score,1) if long_score is not None else None)
 
@@ -1251,19 +1416,129 @@ def _short_evidence(a):
 def _long_evidence(a):
     info=a['info']
     fundscore='N/D' if a.get('fund_score') is None else f'{float(a["fund_score"]):.0f}/100'
-    out=[f'Qualidade: {a["fund_label"]} · score {fundscore} · dados {float(a["fund_complete"]):.0f}%']
+    sector=sector_name(info)
+    out=[f'Qualidade ajustada ao setor ({sector}): {a["fund_label"]} · {fundscore} · dados {float(a["fund_complete"]):.0f}%']
     if a['kind']=='ETF':
         expense=_num(info,'annualReportExpenseRatio')
         if expense is None: expense=_num(info,'expenseRatio')
         assets=_num(info,'totalAssets')
         out.append(f'TER: {expense*100:.2f}%' if expense is not None else 'TER: N/D')
-        out.append(f'Ativos do fundo: €/$ {assets/1e9:.1f} mil M' if assets is not None else 'Ativos do fundo: N/D')
+        out.append(f'Ativos do fundo: EUR/USD {assets/1e9:.1f} mil M' if assets is not None else 'Ativos do fundo: N/D')
     else:
+        peer=a.get('peer_quality_score'); pval=a.get('peer_valuation_score'); pcount=a.get('peer_count')
+        if peer is not None:
+            valtxt=f' · avaliacao relativa {float(pval):.0f}/100' if pval is not None else ''
+            out.append(f'Vs. {int(pcount)} pares do setor: qualidade {float(peer):.0f}/100{valtxt}')
         rg=_num(info,'revenueGrowth'); roe=_num(info,'returnOnEquity'); fcf=_num(info,'freeCashflow'); de=_num(info,'debtToEquity')
-        out.append(f'Receitas: {_fmt_num(rg*100 if rg is not None else None,1,"%")} · ROE {_fmt_num(roe*100 if roe is not None else None,1,"%")}' )
-        fcf_txt='positivo' if fcf is not None and fcf>0 else ('negativo' if fcf is not None else 'N/D')
-        out.append(f'FCF {fcf_txt} · Dívida/Capital próprio {_fmt_num(de,0,"%")}' )
+        sector_raw=str(info.get('sector') or '')
+        roe_floor=_sector_fundamental_profile(info)[2]
+        roe_note=' · ROE fraco para o setor' if roe is not None and roe<roe_floor else ''
+        fcf_txt='FCF positivo' if fcf is not None and fcf>0 else ('FCF negativo' if fcf is not None else 'FCF N/D')
+        metrics=f'Receitas {_fmt_num(rg*100 if rg is not None else None,1,"%")} · ROE {_fmt_num(roe*100 if roe is not None else None,1,"%")}'+roe_note
+        if peer is None:
+            out.append(metrics)
+            debt_txt='N/D' if de is None else _fmt_num(de,0,'%')
+            if sector_raw=='Financial Services':
+                out.append(f'{fcf_txt} · divida/capital proprio nao usada como criterio principal em financeiras')
+            else:
+                out.append(f'{fcf_txt} · Divida/Capital proprio {debt_txt}')
+        else:
+            out.append(metrics+' · '+fcf_txt)
     return out[:3]
+
+
+def _rank_score(series, higher_better=True):
+    s=pd.to_numeric(series,errors='coerce')
+    n=int(s.notna().sum())
+    if n<3:
+        return pd.Series(np.nan,index=s.index,dtype=float)
+    ranks=s.rank(method='average',ascending=True)
+    if n==1:
+        return pd.Series(50.0,index=s.index,dtype=float)
+    pct=(ranks-1.0)/(n-1.0)*100.0
+    return pct if higher_better else (100.0-pct)
+
+
+def apply_peer_context(rows):
+    # Uses only assets already downloaded by the Today scan; no extra network calls.
+    if not rows:
+        return rows
+    records=[]
+    for rec in rows:
+        a=rec.get('_analysis') or {}
+        if a.get('kind')!='A\u00e7\u00e3o':
+            continue
+        info=a.get('info') or {}
+        market_cap=_num(info,'marketCap')
+        fcf=_num(info,'freeCashflow')
+        records.append({
+            'Ticker':a.get('xtb_ticker'),
+            'Setor':sector_name(info),
+            'Receitas':(_num(info,'revenueGrowth')*100 if _num(info,'revenueGrowth') is not None else None),
+            'Lucros':(_num(info,'earningsGrowth')*100 if _num(info,'earningsGrowth') is not None else None),
+            'Margem operacional':(_num(info,'operatingMargins')*100 if _num(info,'operatingMargins') is not None else None),
+            'Margem liquida':(_num(info,'profitMargins')*100 if _num(info,'profitMargins') is not None else None),
+            'ROE':(_num(info,'returnOnEquity')*100 if _num(info,'returnOnEquity') is not None else None),
+            'Divida':_num(info,'debtToEquity'),
+            'FCF yield':((fcf/market_cap*100) if fcf is not None and market_cap and market_cap>0 else None),
+            'P/E':_num(info,'trailingPE'),
+            'Forward P/E':_num(info,'forwardPE'),
+            'P/B':_num(info,'priceToBook'),
+            'EV/EBITDA':_num(info,'enterpriseToEbitda'),
+        })
+    if not records:
+        return rows
+    frame=pd.DataFrame(records).set_index('Ticker')
+    peer_map={}
+    for sector,sub in frame.groupby('Setor'):
+        if len(sub)<3:
+            continue
+        raw_sector=None
+        for rec in rows:
+            a=rec.get('_analysis') or {}
+            if a.get('xtb_ticker') in sub.index:
+                raw_sector=str((a.get('info') or {}).get('sector') or '')
+                break
+        quality_cols=['Receitas','Lucros','Margem operacional','Margem liquida','ROE','FCF yield']
+        lower_quality=['Divida']
+        if raw_sector=='Financial Services':
+            quality_cols=['Receitas','Lucros','Margem liquida','ROE']
+            lower_quality=[]
+        quality_parts=[]
+        for col in quality_cols:
+            if col in sub and pd.to_numeric(sub[col],errors='coerce').notna().sum()>=3:
+                quality_parts.append(_rank_score(sub[col],True).rename(col))
+        for col in lower_quality:
+            if col in sub and pd.to_numeric(sub[col],errors='coerce').notna().sum()>=3:
+                quality_parts.append(_rank_score(sub[col],False).rename(col))
+        valuation_parts=[]
+        for col in ['P/E','Forward P/E','P/B','EV/EBITDA']:
+            if col in sub:
+                vals=pd.to_numeric(sub[col],errors='coerce').where(pd.to_numeric(sub[col],errors='coerce')>0)
+                if vals.notna().sum()>=3:
+                    valuation_parts.append(_rank_score(vals,False).rename(col))
+        if 'FCF yield' in sub and pd.to_numeric(sub['FCF yield'],errors='coerce').notna().sum()>=3:
+            valuation_parts.append(_rank_score(sub['FCF yield'],True).rename('FCF yield'))
+        qscore=pd.concat(quality_parts,axis=1).mean(axis=1,skipna=True) if quality_parts else pd.Series(np.nan,index=sub.index)
+        vscore=pd.concat(valuation_parts,axis=1).mean(axis=1,skipna=True) if valuation_parts else pd.Series(np.nan,index=sub.index)
+        for ticker in sub.index:
+            peer_map[ticker]={
+                'quality':(float(qscore.loc[ticker]) if pd.notna(qscore.loc[ticker]) else None),
+                'valuation':(float(vscore.loc[ticker]) if pd.notna(vscore.loc[ticker]) else None),
+                'count':int(len(sub)),
+            }
+    for rec in rows:
+        a=rec.get('_analysis') or {}
+        peer=peer_map.get(a.get('xtb_ticker'))
+        if peer:
+            a['peer_quality_score']=peer['quality']
+            a['peer_valuation_score']=peer['valuation']
+            a['peer_count']=peer['count']
+            long_action,long_score=_long_action(a,holding=False)
+            rec['Longo prazo']=long_action
+            rec['Score longo']=long_score
+            rec['Evid\u00eancias longo']=' · '.join(_long_evidence(a))
+    return rows
 
 
 def quick_candidate_row(ticker):
@@ -1450,6 +1725,7 @@ with TABS[0]:
                     pass
                 prog.progress(i/max(len(universe),1),text=f'{i}/{len(universe)}')
             prog.empty()
+            rows=apply_peer_context(rows)
             st.session_state['v14_scan_rows']=rows
 
     rows=st.session_state.get('v14_scan_rows',[])
@@ -1475,7 +1751,7 @@ with TABS[0]:
             with st.expander('Ver Top 10 curto prazo'):
                 st.dataframe(_compact_table(short,'curto'),hide_index=True,use_container_width=True)
         with hlong:
-            st.caption('Meses/anos · qualidade fundamental/ETF com apoio da tendência.')
+            st.caption('Meses/anos · qualidade ajustada ao setor; quando existem pelo menos 3 pares analisados, compara tambem a empresa com esses pares.')
             _top_cards(long,rows,'longo',5)
             with st.expander('Ver Top 10 longo prazo'):
                 st.dataframe(_compact_table(long,'longo'),hide_index=True,use_container_width=True)
