@@ -1763,8 +1763,122 @@ def _dashboard_card(rec, label, score=None, extra=None):
     )
 
 
+
+def _comparison_rank(values, higher_better=True):
+    """Score 0-100 apenas dentro do conjunto comparado; requer pelo menos 2 valores."""
+    series=pd.to_numeric(pd.Series(values),errors='coerce')
+    valid=series.dropna()
+    if len(valid)<2:
+        return [None]*len(series)
+    ranks=valid.rank(method='average',ascending=True)
+    pct=(ranks-1.0)/(len(valid)-1.0)*100.0
+    scores={i:(float(v) if higher_better else float(100.0-v)) for i,v in pct.items()}
+    return [scores.get(i) for i in range(len(series))]
+
+
+def _comparison_rows(analyses):
+    rows=[]
+    for a in analyses:
+        info=a['info']; row=a['row']; price=float(row['Close'])
+        short_action,short_score=_short_action(a,holding=False)
+        long_action,long_score=_long_action(a,holding=False)
+        fcf=_num(info,'freeCashflow'); market_cap=_num(info,'marketCap')
+        fcf_yield=(fcf/market_cap*100) if fcf is not None and market_cap and market_cap>0 else None
+        cons=analyst_consensus(info,price) if a['kind']=='Ação' else {
+            'Preço alvo médio consenso':None,'Nº analistas':None,'Potencial consenso %':None
+        }
+        rows.append({
+            'Ticker':a['xtb_ticker'],
+            'Empresa':a['company'],
+            'Setor':sector_name(info),
+            'Mercado':a['market'],
+            'Moeda':a['currency'],
+            'Preço':price,
+            'Qualidade':a['fund_label'],
+            'Score qualidade':a['fund_score'],
+            'Dados fundamentais %':a['fund_complete'],
+            'Crescimento receitas %':(_num(info,'revenueGrowth')*100 if _num(info,'revenueGrowth') is not None else None),
+            'Crescimento lucros %':(_num(info,'earningsGrowth')*100 if _num(info,'earningsGrowth') is not None else None),
+            'Margem operacional %':(_num(info,'operatingMargins')*100 if _num(info,'operatingMargins') is not None else None),
+            'Margem líquida %':(_num(info,'profitMargins')*100 if _num(info,'profitMargins') is not None else None),
+            'ROE %':(_num(info,'returnOnEquity')*100 if _num(info,'returnOnEquity') is not None else None),
+            'FCF yield %':fcf_yield,
+            'Dívida/Capital próprio %':_num(info,'debtToEquity'),
+            'P/E':_num(info,'trailingPE'),
+            'Forward P/E':_num(info,'forwardPE'),
+            'P/B':_num(info,'priceToBook'),
+            'EV/EBITDA':_num(info,'enterpriseToEbitda'),
+            'Técnica':a['tech_label'],
+            'Score técnico':a['tech_score'],
+            'RSI':float(row['RSI14']),
+            'Retorno 20d %':float(row['RET20']),
+            'Retorno 60d %':float(row['RET60']),
+            'Curto prazo':short_action,
+            'Score entrada':short_score,
+            'Longo prazo':long_action,
+            'Score longo':long_score,
+            'Alvo médio analistas':cons.get('Preço alvo médio consenso'),
+            'Potencial analistas %':cons.get('Potencial consenso %'),
+            'Nº analistas':cons.get('Nº analistas'),
+            'Recomendação analistas':str(info.get('recommendationKey') or 'N/D').replace('_',' ').title(),
+            '_analysis':a,
+        })
+    df=pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    # Avaliação relativa apenas entre as empresas selecionadas. Métricas inválidas/negativas são ignoradas.
+    val_parts=[]
+    for col in ['P/E','Forward P/E','P/B','EV/EBITDA']:
+        vals=pd.to_numeric(df[col],errors='coerce').where(pd.to_numeric(df[col],errors='coerce')>0)
+        sc=_comparison_rank(vals.tolist(),higher_better=False)
+        if any(v is not None for v in sc): val_parts.append(pd.Series(sc,index=df.index))
+    sc=_comparison_rank(pd.to_numeric(df['FCF yield %'],errors='coerce').tolist(),higher_better=True)
+    if any(v is not None for v in sc): val_parts.append(pd.Series(sc,index=df.index))
+    df['Score avaliação comparada']=pd.concat(val_parts,axis=1).mean(axis=1,skipna=True) if val_parts else np.nan
+
+    # Rentabilidade: combinação simples das métricas de eficiência disponíveis no conjunto.
+    profit_parts=[]
+    for col in ['ROE %','Margem operacional %','Margem líquida %']:
+        sc=_comparison_rank(pd.to_numeric(df[col],errors='coerce').tolist(),higher_better=True)
+        if any(v is not None for v in sc): profit_parts.append(pd.Series(sc,index=df.index))
+    df['Score rentabilidade comparada']=pd.concat(profit_parts,axis=1).mean(axis=1,skipna=True) if profit_parts else np.nan
+
+    # Analistas: só usa potencial quando há pelo menos 3 opiniões, para reduzir leituras frágeis.
+    analyst_up=pd.to_numeric(df['Potencial analistas %'],errors='coerce')
+    analyst_n=pd.to_numeric(df['Nº analistas'],errors='coerce')
+    analyst_up=analyst_up.where(analyst_n>=3)
+    df['Score analistas comparado']=_comparison_rank(analyst_up.tolist(),higher_better=True)
+
+    # Score geral é um resumo heurístico, não uma previsão. Repondera automaticamente dados em falta.
+    overall=[]
+    for _,r in df.iterrows():
+        parts=[]
+        for col,w in [('Score qualidade',0.40),('Score avaliação comparada',0.25),('Score entrada',0.25),('Score analistas comparado',0.10)]:
+            v=pd.to_numeric(pd.Series([r.get(col)]),errors='coerce').iloc[0]
+            if pd.notna(v): parts.append((float(v),w))
+        overall.append(round(sum(v*w for v,w in parts)/sum(w for _,w in parts),1) if parts else None)
+    df['Score equilíbrio geral']=overall
+    return df
+
+
+def _winner_ticker(df, column, higher=True):
+    if df is None or df.empty or column not in df.columns:
+        return None
+    s=pd.to_numeric(df[column],errors='coerce')
+    if s.notna().sum()==0:
+        return None
+    idx=s.idxmax() if higher else s.idxmin()
+    return str(df.loc[idx,'Ticker'])
+
+
+def _comparison_metric_card(label, ticker, note=''):
+    st.metric(label,ticker or 'N/D')
+    if note:
+        st.caption(note)
+
 st.caption('Modo simples: decisão prática primeiro, 3 evidências interpretadas e detalhe apenas quando pedes.')
-PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Analisar'], horizontal=True, label_visibility='collapsed', key='main_page')
+PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Analisar', 'Comparar'], horizontal=True, label_visibility='collapsed', key='main_page')
 
 if PAGE == 'Hoje':
     st.subheader('Dashboard de oportunidades')
@@ -2049,6 +2163,125 @@ APP_PASSWORD = "uma-palavra-passe-forte"
             if isinstance(h2,pd.DataFrame) and not h2.empty:
                 cols2=['Ticker XTB','Decisão utilizador','Preço na decisão','Preço atual','Variação desde decisão %','Percurso desde decisão','Regra atual']
                 st.dataframe(h2[[c for c in cols2 if c in h2.columns]],hide_index=True,use_container_width=True)
+
+
+elif PAGE == 'Comparar':
+    st.subheader('Comparador de ações')
+    st.caption('Compara 2 a 4 ações lado a lado. Primeiro a conclusão; depois os números que a justificam.')
+
+    c1,c2=st.columns(2)
+    with c1:
+        cmp1=st.text_input('1 · Ticker XTB',value='AAPL.US',key='cmp_1',placeholder='Ex.: AAPL.US')
+        cmp3=st.text_input('3 · Opcional',value='',key='cmp_3',placeholder='Ex.: GOOGL.US')
+    with c2:
+        cmp2=st.text_input('2 · Ticker XTB',value='MSFT.US',key='cmp_2',placeholder='Ex.: MSFT.US')
+        cmp4=st.text_input('4 · Opcional',value='',key='cmp_4',placeholder='Ex.: NVDA.US')
+
+    b1,b2=st.columns([2,1])
+    with b1:
+        run_compare=st.button('Comparar',type='primary',use_container_width=True,key='cmp_run')
+    with b2:
+        if st.button('Limpar resultado',use_container_width=True,key='cmp_clear'):
+            st.session_state.pop('comparison_df',None)
+            st.session_state.pop('comparison_time',None)
+            st.rerun()
+
+    if run_compare:
+        tickers=[]
+        for raw in [cmp1,cmp2,cmp3,cmp4]:
+            t=str(raw or '').upper().strip()
+            if t and t not in tickers:
+                tickers.append(t)
+        if len(tickers)<2:
+            st.error('Indica pelo menos 2 tickers diferentes.')
+        else:
+            analyses=[]; errors=[]
+            prog=st.progress(0,text='A comparar o essencial...')
+            for i,t in enumerate(tickers,1):
+                try:
+                    a=analyze_asset(t,detailed=False)
+                    if a['kind']!='Ação':
+                        errors.append(f'{t}: é {a["kind"]}; este comparador está otimizado para ações.')
+                    else:
+                        analyses.append(a)
+                        add_watchlist(a['xtb_ticker'])
+                except Exception as e:
+                    errors.append(f'{t}: {e}')
+                prog.progress(i/max(len(tickers),1),text=f'{i}/{len(tickers)}')
+            prog.empty()
+            if len(analyses)>=2:
+                st.session_state['comparison_df']=_comparison_rows(analyses)
+                st.session_state['comparison_time']=datetime.now().strftime('%d/%m/%Y %H:%M')
+            else:
+                st.session_state.pop('comparison_df',None)
+            if errors:
+                with st.expander('Avisos da comparação'):
+                    for e in errors: st.write('• '+e)
+
+    cdf=st.session_state.get('comparison_df')
+    if isinstance(cdf,pd.DataFrame) and not cdf.empty:
+        sector_values=[str(x) for x in cdf['Setor'].fillna('N/D').tolist()]
+        same_sector=(len(set(sector_values))==1 and sector_values[0]!='N/D')
+        ctime=st.session_state.get('comparison_time')
+        if ctime:
+            st.caption(f'Comparação calculada em {ctime} · preços/dados podem ter atraso conforme a fonte.')
+        if not same_sector:
+            st.warning('As empresas são de setores diferentes. Qualidade continua ajustada ao setor, mas múltiplos de avaliação (P/E, P/B, EV/EBITDA) são apenas uma comparação indicativa entre as selecionadas.')
+
+        best_overall=_winner_ticker(cdf,'Score equilíbrio geral')
+        best_quality=_winner_ticker(cdf,'Score qualidade')
+        best_value=_winner_ticker(cdf,'Score avaliação comparada')
+        best_entry=_winner_ticker(cdf,'Score entrada')
+        best_profit=_winner_ticker(cdf,'Score rentabilidade comparada')
+        best_analysts=_winner_ticker(cdf,'Score analistas comparado')
+
+        st.markdown('### Conclusão rápida')
+        if best_overall:
+            br=cdf[cdf['Ticker']==best_overall].iloc[0]
+            st.success(f"**Melhor equilíbrio no conjunto: {best_overall}** · qualidade {_fmt_num(br.get('Score qualidade'),0,'/100')} · entrada {_fmt_num(br.get('Score entrada'),0,'/100')} · avaliação comparada {_fmt_num(br.get('Score avaliação comparada'),0,'/100')}")
+        q1,q2,q3=st.columns(3)
+        with q1: _comparison_metric_card('🏆 Melhor qualidade',best_quality,'Score fundamental ajustado ao setor')
+        with q2: _comparison_metric_card('💎 Avaliação mais atrativa',best_value,'Relativa apenas às ações comparadas')
+        with q3: _comparison_metric_card('📈 Melhor entrada agora',best_entry,'Técnica, momentum, RSI e volume')
+        q4,q5=st.columns(2)
+        with q4: _comparison_metric_card('💰 Melhor rentabilidade',best_profit,'ROE + margens, quando disponíveis')
+        with q5: _comparison_metric_card('👥 Maior potencial dos analistas',best_analysts,'Só conta quando existem ≥3 opiniões')
+
+        st.markdown('### Lado a lado')
+        overview=cdf[['Ticker','Empresa','Setor','Preço','Moeda','Score qualidade','Score avaliação comparada','Score entrada','Score equilíbrio geral','Curto prazo','Longo prazo']].copy()
+        st.dataframe(overview,hide_index=True,use_container_width=True)
+
+        tq,tv,te,ta=st.tabs(['Qualidade','Avaliação','Entrada','Analistas'])
+        with tq:
+            cols=['Ticker','Qualidade','Score qualidade','Dados fundamentais %','Crescimento receitas %','Crescimento lucros %','Margem operacional %','Margem líquida %','ROE %','FCF yield %','Dívida/Capital próprio %']
+            st.dataframe(cdf[[c for c in cols if c in cdf.columns]],hide_index=True,use_container_width=True)
+            st.caption('A qualidade usa critérios ajustados ao setor. Dívida não é tratada da mesma forma numa financeira e numa tecnológica.')
+        with tv:
+            cols=['Ticker','Score avaliação comparada','P/E','Forward P/E','P/B','EV/EBITDA','FCF yield %']
+            st.dataframe(cdf[[c for c in cols if c in cdf.columns]],hide_index=True,use_container_width=True)
+            st.caption('“Mais barata” aqui significa melhor avaliação relativa entre as selecionadas; não é um cálculo de valor justo intrínseco.')
+        with te:
+            cols=['Ticker','Técnica','Score técnico','RSI','Retorno 20d %','Retorno 60d %','Curto prazo','Score entrada']
+            st.dataframe(cdf[[c for c in cols if c in cdf.columns]],hide_index=True,use_container_width=True)
+            for _,r in cdf.iterrows():
+                a=r['_analysis']
+                _asset_card(r['Ticker'],r['Empresa'],r['Curto prazo'],r['Score entrada'],_short_evidence(a),r['Preço'],r['Moeda'],r['Setor'])
+        with ta:
+            cols=['Ticker','Recomendação analistas','Alvo médio analistas','Potencial analistas %','Nº analistas']
+            st.dataframe(cdf[[c for c in cols if c in cdf.columns]],hide_index=True,use_container_width=True)
+            st.caption('O consenso dos analistas é informação externa e pode mudar; não substitui a análise fundamental nem garante retorno.')
+
+        st.markdown('### Veredito por ação')
+        for _,r in cdf.sort_values('Score equilíbrio geral',ascending=False,na_position='last').iterrows():
+            a=r['_analysis']
+            evidence=[
+                f"Qualidade {r.get('Qualidade','N/D')} · {_fmt_num(r.get('Score qualidade'),0,'/100')}",
+                f"Avaliação comparada {_fmt_num(r.get('Score avaliação comparada'),0,'/100')} · entrada {_fmt_num(r.get('Score entrada'),0,'/100')}",
+                f"Longo prazo: {r.get('Longo prazo','N/D')}",
+            ]
+            _asset_card(r['Ticker'],r['Empresa'],f"EQUILÍBRIO { _fmt_num(r.get('Score equilíbrio geral'),0,'/100') }",r.get('Score equilíbrio geral'),evidence,r['Preço'],r['Moeda'],r['Setor'])
+    else:
+        st.info('Escolhe 2 a 4 ações e carrega em **Comparar**.')
 
 elif PAGE == 'Analisar':
     st.subheader('Analisar uma ação ou ETF')
