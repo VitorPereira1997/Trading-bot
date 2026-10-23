@@ -785,14 +785,73 @@ SECTOR_PT = {
     'Utilities':'Serviços públicos',
 }
 
+# Normaliza variações que podem aparecer nas fontes. O objetivo é comparar o
+# setor económico, não diferenças de capitalização, idioma ou subindústria.
+_SECTOR_CANONICAL = {
+    'technology':'Technology',
+    'information technology':'Technology',
+    'information_technology':'Technology',
+    'tech':'Technology',
+    # Algumas respostas podem devolver a subindústria no campo de setor.
+    'semiconductors':'Technology',
+    'semiconductor equipment & materials':'Technology',
+    'semiconductor equipment and materials':'Technology',
+    'financial services':'Financial Services',
+    'financial':'Financial Services',
+    'financials':'Financial Services',
+    'industrials':'Industrials',
+    'communication services':'Communication Services',
+    'communications services':'Communication Services',
+    'healthcare':'Healthcare',
+    'health care':'Healthcare',
+    'consumer cyclical':'Consumer Cyclical',
+    'consumer discretionary':'Consumer Cyclical',
+    'consumer defensive':'Consumer Defensive',
+    'consumer staples':'Consumer Defensive',
+    'energy':'Energy',
+    'basic materials':'Basic Materials',
+    'materials':'Basic Materials',
+    'real estate':'Real Estate',
+    'utilities':'Utilities',
+}
+
+_TECH_INDUSTRY_HINTS = (
+    'semiconductor', 'software', 'computer hardware', 'consumer electronics',
+    'electronic components', 'communication equipment', 'scientific & technical instruments',
+)
+
+def _canonical_sector(info):
+    for key in ('sector','sectorDisp','sectorKey'):
+        raw=str(info.get(key) or '').strip()
+        if not raw:
+            continue
+        norm=raw.lower().replace('-', ' ').strip()
+        if norm in _SECTOR_CANONICAL:
+            return _SECTOR_CANONICAL[norm]
+        # Chaves de API podem vir com underscores.
+        norm2=norm.replace('_',' ')
+        if norm2 in _SECTOR_CANONICAL:
+            return _SECTOR_CANONICAL[norm2]
+        return raw
+
+    # Fallback conservador: só infere Tecnologia quando a indústria é inequívoca.
+    industry=' '.join(str(info.get(k) or '') for k in ('industry','industryDisp','industryKey')).lower()
+    if any(h in industry for h in _TECH_INDUSTRY_HINTS):
+        return 'Technology'
+    return ''
+
 def sector_name(info):
-    raw=str(info.get('sector') or '').strip()
+    raw=_canonical_sector(info)
     if raw:
         return SECTOR_PT.get(raw, raw)
     if asset_kind(info) == 'ETF':
         cat=str(info.get('category') or '').strip()
         return f'ETF — {cat}' if cat else 'ETF — categoria N/D'
     return 'N/D'
+
+def industry_name(info):
+    raw=str(info.get('industry') or info.get('industryDisp') or info.get('industryKey') or '').strip()
+    return raw if raw else 'N/D'
 
 def _return_pct(df, days):
     s=df['Close'].dropna()
@@ -1791,6 +1850,7 @@ def _comparison_rows(analyses):
             'Ticker':a['xtb_ticker'],
             'Empresa':a['company'],
             'Setor':sector_name(info),
+            'Indústria':industry_name(info),
             'Mercado':a['market'],
             'Moeda':a['currency'],
             'Preço':price,
@@ -2220,13 +2280,17 @@ elif PAGE == 'Comparar':
 
     cdf=st.session_state.get('comparison_df')
     if isinstance(cdf,pd.DataFrame) and not cdf.empty:
-        sector_values=[str(x) for x in cdf['Setor'].fillna('N/D').tolist()]
-        same_sector=(len(set(sector_values))==1 and sector_values[0]!='N/D')
+        sector_values=[str(x).strip() for x in cdf['Setor'].fillna('N/D').tolist()]
+        known_sectors=[x for x in sector_values if x and x!='N/D']
+        unique_known=set(known_sectors)
+        same_sector=(len(unique_known)==1 and len(known_sectors)==len(sector_values))
         ctime=st.session_state.get('comparison_time')
         if ctime:
             st.caption(f'Comparação calculada em {ctime} · preços/dados podem ter atraso conforme a fonte.')
-        if not same_sector:
+        if len(unique_known)>1:
             st.warning('As empresas são de setores diferentes. Qualidade continua ajustada ao setor, mas múltiplos de avaliação (P/E, P/B, EV/EBITDA) são apenas uma comparação indicativa entre as selecionadas.')
+        elif len(known_sectors)<len(sector_values):
+            st.info('A classificação setorial está incompleta para pelo menos uma empresa. A app não assume que isso significa setores diferentes; usa os restantes dados com cautela.')
 
         best_overall=_winner_ticker(cdf,'Score equilíbrio geral')
         best_quality=_winner_ticker(cdf,'Score qualidade')
