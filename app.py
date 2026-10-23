@@ -1538,6 +1538,9 @@ def apply_peer_context(rows):
             a['peer_quality_score']=peer['quality']
             a['peer_valuation_score']=peer['valuation']
             a['peer_count']=peer['count']
+            rec['Qualidade relativa setor']=peer['quality']
+            rec['Valor relativo setor']=peer['valuation']
+            rec['Pares setor']=peer['count']
             long_action,long_score=_long_action(a,holding=False)
             rec['Longo prazo']=long_action
             rec['Score longo']=long_score
@@ -1564,6 +1567,9 @@ def quick_candidate_row(ticker):
         'Longo prazo':long_action,
         'Score longo':long_score,
         'Evidências longo':' · '.join(_long_evidence(a)),
+        'Qualidade relativa setor':None,
+        'Valor relativo setor':None,
+        'Pares setor':None,
         'Data':str(a['df'].index[-1].date()),
         '_analysis':a,
     }
@@ -1699,12 +1705,70 @@ def _top_cards(df, rows, horizon, n=5):
         )
 
 
+def _today_dashboard_groups(view):
+    """Classifica o scan já calculado sem fazer novas chamadas de rede.
+
+    'Valor relativo setor' é um ranking entre pares analisados, não um valor justo intrínseco.
+    """
+    if view is None or view.empty:
+        return view, view, view
+    d=view.copy()
+    short_txt=d['Curto prazo'].astype(str).str.upper()
+    long_txt=d['Longo prazo'].astype(str).str.upper()
+    short_score=pd.to_numeric(d['Score curto'],errors='coerce')
+    long_score=pd.to_numeric(d['Score longo'],errors='coerce')
+    value_score=pd.to_numeric(d.get('Valor relativo setor'),errors='coerce') if 'Valor relativo setor' in d.columns else pd.Series(np.nan,index=d.index)
+    quality_peer=pd.to_numeric(d.get('Qualidade relativa setor'),errors='coerce') if 'Qualidade relativa setor' in d.columns else pd.Series(np.nan,index=d.index)
+
+    # Entrada agora: técnica permite entrada e longo prazo não é fraco.
+    now_mask=short_txt.str.contains('CANDIDATO A ENTRADA',na=False) & (long_score>=60) & ~long_txt.str.contains('NÃO PRIORIZAR|DADOS INSUFICIENTES',regex=True,na=False)
+    now=d.loc[now_mask].copy().sort_values(['Score curto','Score longo'],ascending=False,na_position='last')
+
+    # Possível subavaliação: avaliação relativa forte vs. pelo menos 3 pares + qualidade suficiente.
+    value_mask=(value_score>=65) & (long_score>=60) & ((quality_peer>=45) | quality_peer.isna())
+    value=d.loc[value_mask].copy().sort_values(['Valor relativo setor','Score longo'],ascending=False,na_position='last')
+
+    # Boa qualidade/score de longo prazo, mas o timing técnico pede espera.
+    wait_mask=(long_score>=65) & ~now_mask & short_txt.str.contains('AGUARDAR|ESTICADA|NÃO ENTRAR',regex=True,na=False)
+    wait=d.loc[wait_mask].copy().sort_values(['Score longo','Score curto'],ascending=False,na_position='last')
+    return now, value, wait
+
+
+def _dashboard_card(rec, label, score=None, extra=None):
+    a=rec['_analysis']
+    evidence=[]
+    if label=='agora':
+        evidence=_short_evidence(a)[:2] + [_long_evidence(a)[0]]
+        action=rec['Curto prazo']
+        score=rec.get('Score curto') if score is None else score
+    elif label=='valor':
+        val=rec.get('Valor relativo setor')
+        peers=rec.get('Pares setor')
+        evidence=[
+            f"Valor relativo ao setor: {_fmt_num(val,0,'/100')}" + (f" · {int(peers)} pares analisados" if peers else ''),
+            _long_evidence(a)[0],
+            f"Timing atual: {rec.get('Curto prazo','N/D')}",
+        ]
+        action='POSSÍVEL VALOR RELATIVO'
+        score=val if score is None else score
+    else:
+        evidence=_long_evidence(a)[:2] + [f"Timing: {rec.get('Curto prazo','N/D')}"]
+        action='BOA TESE · AGUARDAR ENTRADA'
+        score=rec.get('Score longo') if score is None else score
+    if extra:
+        evidence.append(extra)
+    _asset_card(
+        rec['Ticker'],rec['Empresa'],action,score,evidence,rec.get('Preço'),rec.get('Moeda',''),
+        f"{rec.get('Setor','N/D')} · {rec.get('Mercado','')}"
+    )
+
+
 st.caption('Modo simples: decisão prática primeiro, 3 evidências interpretadas e detalhe apenas quando pedes.')
 PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Analisar'], horizontal=True, label_visibility='collapsed', key='main_page')
 
 if PAGE == 'Hoje':
-    st.subheader('O que merece atenção hoje?')
-    st.markdown('<div class="section-note">Um resumo curto. Curto e longo prazo ficam separados para não misturar estratégias.</div>', unsafe_allow_html=True)
+    st.subheader('Dashboard de oportunidades')
+    st.markdown('<div class="section-note">Primeiro a decisão prática. O mesmo scan é organizado por entrada, valor relativo ao setor e oportunidades que pedem paciência.</div>', unsafe_allow_html=True)
 
     c1,c2=st.columns([3,1])
     with c1:
@@ -1731,6 +1795,7 @@ if PAGE == 'Hoje':
             prog.empty()
             rows=apply_peer_context(rows)
             st.session_state['v14_scan_rows']=rows
+            st.session_state['v20_scan_time']=datetime.now().strftime('%d/%m/%Y %H:%M')
 
     rows=st.session_state.get('v14_scan_rows',[])
     if rows:
@@ -1738,29 +1803,54 @@ if PAGE == 'Hoje':
         sectors=sorted([x for x in df['Setor'].dropna().unique().tolist() if x and x!='N/D'])
         chosen_sector=st.selectbox('Setor',['Todos']+sectors,key='v14_sector')
         view=df if chosen_sector=='Todos' else df[df['Setor']==chosen_sector]
+        scan_time=st.session_state.get('v20_scan_time')
+        if scan_time:
+            st.caption(f'Última análise nesta sessão: {scan_time}. Os preços podem ser atrasados conforme a fonte.')
+
+        now,value,wait=_today_dashboard_groups(view)
+        m1,m2,m3,m4=st.columns(4)
+        m1.metric('Analisados',len(view))
+        m2.metric('Entrada agora',len(now))
+        m3.metric('Valor relativo',len(value))
+        m4.metric('Aguardar entrada',len(wait))
+
+        st.markdown('### 🟢 Oportunidades de entrada agora')
+        st.caption('Técnica permite entrada e o quadro de longo prazo não é fraco. Não é uma ordem de compra.')
+        if now.empty:
+            st.info('Nenhuma oportunidade passa estes filtros neste momento. AGUARDAR também é uma decisão válida.')
+        else:
+            for _,rr in now.head(5).iterrows():
+                rec=next((x for x in rows if x['Ticker']==rr['Ticker']),None)
+                if rec: _dashboard_card(rec,'agora')
+
+        st.markdown('### 💎 Possivelmente subvalorizadas vs. setor')
+        st.caption('Avaliação atrativa relativamente aos pares analisados do mesmo setor + qualidade suficiente. Isto não é um valor justo intrínseco.')
+        if value.empty:
+            st.info('Sem casos com comparação setorial suficientemente forte neste scan.')
+        else:
+            for _,rr in value.head(5).iterrows():
+                rec=next((x for x in rows if x['Ticker']==rr['Ticker']),None)
+                if rec: _dashboard_card(rec,'valor')
+
+        st.markdown('### 🟠 Boas empresas · aguardar melhor entrada')
+        st.caption('O longo prazo é interessante, mas o timing técnico não justifica perseguir o preço agora.')
+        if wait.empty:
+            st.info('Sem casos relevantes nesta categoria.')
+        else:
+            for _,rr in wait.head(5).iterrows():
+                rec=next((x for x in rows if x['Ticker']==rr['Ticker']),None)
+                if rec: _dashboard_card(rec,'espera')
+
         short=view.sort_values('Score curto',ascending=False,na_position='last').head(10)
         long=view.sort_values('Score longo',ascending=False,na_position='last').head(10)
-
-        s_candidates=int(short['Curto prazo'].astype(str).str.contains('CANDIDATO').sum()) if not short.empty else 0
-        l_candidates=int(long['Longo prazo'].astype(str).str.contains('CANDIDATO').sum()) if not long.empty else 0
-        r1,r2,r3=st.columns(3)
-        r1.metric('Analisados',len(view))
-        r2.metric('Sinais curto prazo',s_candidates)
-        r3.metric('Candidatos longo prazo',l_candidates)
-
-        hshort,hlong=st.tabs(['Curto prazo', 'Longo prazo'])
-        with hshort:
-            st.caption('5–30 dias de mercado · a app interpreta tendência, momentum, RSI e volume e evita confundir força com bom ponto de entrada.')
-            _top_cards(short,rows,'curto',5)
-            with st.expander('Ver Top 10 curto prazo'):
+        with st.expander('Explorar rankings completos'):
+            hshort,hlong=st.tabs(['Top 10 curto prazo','Top 10 longo prazo'])
+            with hshort:
                 st.dataframe(_compact_table(short,'curto'),hide_index=True,use_container_width=True)
-        with hlong:
-            st.caption('Meses/anos · qualidade ajustada ao setor; quando existem pelo menos 3 pares analisados, compara tambem a empresa com esses pares.')
-            _top_cards(long,rows,'longo',5)
-            with st.expander('Ver Top 10 longo prazo'):
+            with hlong:
                 st.dataframe(_compact_table(long,'longo'),hide_index=True,use_container_width=True)
 
-        candidates=list(dict.fromkeys(short['Ticker'].tolist()+long['Ticker'].tolist()))
+        candidates=list(dict.fromkeys(now['Ticker'].tolist()+value['Ticker'].tolist()+wait['Ticker'].tolist()+short['Ticker'].tolist()+long['Ticker'].tolist()))
         if candidates:
             st.divider()
             st.markdown('### Decidir sobre uma oportunidade')
@@ -1798,7 +1888,7 @@ if PAGE == 'Hoje':
                             log_decision(a,'REJEITADA',objective=objective)
                             st.success('Guardada para comparação futura.')
     else:
-        st.info('Carrega em **Atualizar oportunidades** para gerar o resumo do dia.')
+        st.info('A dashboard está pronta. Carrega em **Atualizar oportunidades** para gerar a análise atual sem tornar o arranque da app lento.')
 
 elif PAGE == 'Carteira':
     st.subheader('Minha carteira')
