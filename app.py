@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import streamlit as st
-import yfinance as yf
 
 st.set_page_config(page_title='Carteira Inteligente', page_icon='📊', layout='wide')
 
@@ -335,6 +334,8 @@ def indicators(df):
 
 @st.cache_data(ttl=300)
 def price_data(ticker, period='5y', interval='1d'):
+    # Import tardio: o arranque da interface não depende do yfinance.
+    import yfinance as yf
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False, threads=False)
     if df.empty:
         raise ValueError(f'Sem dados de mercado para {ticker}.')
@@ -344,6 +345,8 @@ def price_data(ticker, period='5y', interval='1d'):
 
 @st.cache_data(ttl=1800)
 def asset_info(ticker):
+    # Import tardio: só carrega yfinance quando o utilizador pede análise.
+    import yfinance as yf
     t = yf.Ticker(ticker)
     try:
         info = t.info or {}
