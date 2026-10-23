@@ -1,5 +1,10 @@
 import math
 import html
+import json
+import urllib.request
+import urllib.error
+import urllib.parse
+import hmac
 from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
@@ -8,8 +13,26 @@ import streamlit as st
 import yfinance as yf
 
 st.set_page_config(page_title='Carteira Inteligente', page_icon='📊', layout='wide')
+
+# Proteção opcional da aplicação. Recomendado quando a carteira pessoal fica
+# guardada permanentemente num backend. A palavra-passe existe apenas nos Secrets.
+try:
+    _APP_PASSWORD=str(st.secrets.get('APP_PASSWORD','') or '')
+except Exception:
+    _APP_PASSWORD=''
+if _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
+    st.title('🔒 Carteira Inteligente')
+    _pw=st.text_input('Palavra-passe da aplicação',type='password')
+    if st.button('Entrar',type='primary',use_container_width=True):
+        if hmac.compare_digest(str(_pw),_APP_PASSWORD):
+            st.session_state['_app_authenticated']=True
+            st.rerun()
+        else:
+            st.error('Palavra-passe incorreta.')
+    st.stop()
 st.title('📊 Carteira Inteligente')
 st.caption('Curto prazo · Longo prazo · Evidências essenciais. Dados identificados; não envia ordens reais.')
+
 
 MARKETS = {
     'EUA': ['AAPL.US','MSFT.US','NVDA.US','AMZN.US','META.US','GOOGL.US','AVGO.US','TSLA.US','JPM.US','V.US','MA.US','LLY.US','WMT.US','COST.US','NFLX.US','AMD.US','ORCL.US','CRM.US','ADBE.US','QCOM.US','XOM.US','CVX.US','KO.US','PEP.US','DIS.US','CAT.US','GE.US','IBM.US'],
@@ -141,6 +164,139 @@ if 'portfolio_input' not in st.session_state:
     st.session_state.portfolio_input = []
 if 'decision_history' not in st.session_state:
     st.session_state.decision_history = []
+
+# -----------------------------------------------------------------------------
+# Persistência permanente (Supabase)
+# -----------------------------------------------------------------------------
+# A sessão do Streamlit é temporária. Quando estes 3 secrets existem, a carteira
+# e o histórico de decisões são carregados e guardados numa tabela Supabase.
+# A chave service_role fica apenas no servidor Streamlit e nunca é mostrada na UI.
+
+def _secret(name, default=None):
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+def persistence_config():
+    url=str(_secret('SUPABASE_URL','') or '').strip().rstrip('/')
+    key=str(_secret('SUPABASE_SECRET_KEY','') or _secret('SUPABASE_SERVICE_ROLE_KEY','') or '').strip()
+    owner=str(_secret('PORTFOLIO_OWNER_ID','') or '').strip()
+    return url,key,owner
+
+def persistence_enabled():
+    url,key,owner=persistence_config()
+    return bool(url and key and owner)
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(k):_json_safe(v) for k,v in value.items()}
+    if isinstance(value, (list,tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        value=float(value)
+    if isinstance(value, float):
+        return None if not math.isfinite(value) else value
+    if isinstance(value, (datetime,pd.Timestamp)):
+        return value.isoformat()
+    if value is pd.NA:
+        return None
+    return value
+
+def _supabase_headers():
+    _,key,_=persistence_config()
+    headers={
+        'apikey':key,
+        'Content-Type':'application/json',
+        'Accept':'application/json',
+        'User-Agent':'streamlit-portfolio-backend/1.0',
+    }
+    # As novas chaves sb_secret_* não são JWT e devem ir apenas em `apikey`.
+    # Mantém compatibilidade com a legacy service_role (JWT) se o utilizador já a tiver.
+    if key and not key.startswith('sb_secret_'):
+        headers['Authorization']=f'Bearer {key}'
+    return headers
+
+def _supabase_request(method, path, payload=None, extra_headers=None, timeout=12):
+    url,_,_=persistence_config()
+    if not url:
+        raise RuntimeError('SUPABASE_URL não configurado.')
+    data=None
+    if payload is not None:
+        data=json.dumps(_json_safe(payload),ensure_ascii=False,allow_nan=False).encode('utf-8')
+    headers=_supabase_headers()
+    if extra_headers:
+        headers.update(extra_headers)
+    req=urllib.request.Request(url+path,data=data,headers=headers,method=method)
+    try:
+        with urllib.request.urlopen(req,timeout=timeout) as resp:
+            raw=resp.read().decode('utf-8')
+            return json.loads(raw) if raw.strip() else None
+    except urllib.error.HTTPError as e:
+        detail=e.read().decode('utf-8',errors='replace')
+        raise RuntimeError(f'Erro Supabase HTTP {e.code}: {detail[:300]}') from e
+    except Exception as e:
+        raise RuntimeError(f'Falha de ligação ao armazenamento: {e}') from e
+
+def persistent_state_payload():
+    return {
+        'portfolio_input':_json_safe(st.session_state.get('portfolio_input',[])),
+        'decision_history':_json_safe(st.session_state.get('decision_history',[])),
+    }
+
+def save_persistent_state(show_error=False):
+    if not persistence_enabled():
+        st.session_state['persistence_status']='Apenas sessão'
+        return False
+    _,_,owner=persistence_config()
+    payload={
+        'owner_id':owner,
+        'state':persistent_state_payload(),
+        'updated_at':datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        _supabase_request(
+            'POST',
+            '/rest/v1/trading_bot_state?on_conflict=owner_id',
+            payload,
+            {'Prefer':'resolution=merge-duplicates,return=minimal'},
+        )
+        st.session_state['persistence_status']='Ligado'
+        st.session_state['persistence_last_save']=payload['updated_at']
+        st.session_state.pop('persistence_error',None)
+        return True
+    except Exception as e:
+        st.session_state['persistence_status']='Erro'
+        st.session_state['persistence_error']=str(e)
+        if show_error:
+            st.error(f'Não foi possível guardar permanentemente: {e}')
+        return False
+
+def load_persistent_state(force=False):
+    if st.session_state.get('_persistent_loaded') and not force:
+        return
+    st.session_state['_persistent_loaded']=True
+    if not persistence_enabled():
+        st.session_state['persistence_status']='Apenas sessão'
+        return
+    _,_,owner=persistence_config()
+    q=urllib.parse.quote(owner,safe='')
+    try:
+        rows=_supabase_request('GET',f'/rest/v1/trading_bot_state?owner_id=eq.{q}&select=state,updated_at') or []
+        if rows:
+            state=rows[0].get('state') or {}
+            st.session_state.portfolio_input=list(state.get('portfolio_input') or [])
+            st.session_state.decision_history=list(state.get('decision_history') or [])
+            st.session_state['persistence_last_save']=rows[0].get('updated_at')
+        st.session_state['persistence_status']='Ligado'
+        st.session_state.pop('persistence_error',None)
+    except Exception as e:
+        st.session_state['persistence_status']='Erro'
+        st.session_state['persistence_error']=str(e)
+
+load_persistent_state()
 
 def add_watchlist(ticker):
     t = str(ticker).upper().strip()
@@ -829,6 +985,7 @@ def log_decision(a, action, suggested_qty=None, suggested_invested_eur=None, act
         'Nota':note or '',
     }
     st.session_state.decision_history.append(row)
+    save_persistent_state()
     return row
 
 def add_or_merge_portfolio_position(ticker, qty, entry_price, objective='Longo prazo', personal_target=0.0, origin='Oportunidade aceite', entry_date=None, thesis=''):
@@ -864,6 +1021,7 @@ def add_or_merge_portfolio_position(ticker, qty, entry_price, objective='Longo p
             'Objetivo':objective,'Origem':origin,'Tese/nota':str(thesis or ''),
         })
     st.session_state.portfolio_input=rows
+    save_persistent_state()
 
 def portfolio_rule_action(a, personal_target=0.0, weight_pct=None):
     current=float(a['row']['Close'])
@@ -980,11 +1138,87 @@ def _quick_scores(a):
     return round(short_score,1), (round(long_score,1) if long_score is not None else None)
 
 
+def _short_context(a):
+    """Traduz os principais indicadores técnicos para uma leitura prática e curta."""
+    r=a['row']
+    price=float(r['Close'])
+    ema20=float(r['EMA20']); ema50=float(r['EMA50']); ema200=float(r['EMA200'])
+    rsi_v=float(r['RSI14'])
+    ret20=float(r['RET20']); ret60=float(r['RET60'])
+    vol20=float(r['VOL20'])
+    vol_rel=(float(r['Volume'])/vol20) if vol20>0 else None
+
+    if price>ema20>ema50>ema200:
+        trend_label='Forte tendência ascendente'
+    elif price>ema200:
+        trend_label='Tendência principal positiva'
+    elif price<ema20<ema50<ema200:
+        trend_label='Forte tendência descendente'
+    else:
+        trend_label='Tendência mista / sem confirmação'
+
+    if ret20>=5 and ret60>=10:
+        momentum_label='Momentum forte'
+    elif ret20>0 and ret60>0:
+        momentum_label='Momentum positivo'
+    elif ret20<0 and ret60<0:
+        momentum_label='Momentum negativo'
+    else:
+        momentum_label='Momentum misto'
+
+    if rsi_v>=78:
+        rsi_label='muito esticado / sobrecomprado'
+    elif rsi_v>=70:
+        rsi_label='esticado / sobrecomprado'
+    elif rsi_v>=55:
+        rsi_label='positivo, sem extremo'
+    elif rsi_v>=45:
+        rsi_label='neutro'
+    elif rsi_v>=30:
+        rsi_label='fraco'
+    else:
+        rsi_label='muito pressionado / sobrevenda'
+
+    if vol_rel is None:
+        volume_label='volume sem referência suficiente'
+    elif vol_rel>=1.20:
+        volume_label='volume confirma o movimento'
+    elif vol_rel<=0.80:
+        volume_label='volume abaixo do normal'
+    else:
+        volume_label='volume normal'
+
+    stretched = bool(rsi_v>=70 and ret20>0)
+    very_stretched = bool(rsi_v>=78 and ret20>0)
+    return {
+        'trend':trend_label,
+        'momentum':momentum_label,
+        'rsi_label':rsi_label,
+        'volume_label':volume_label,
+        'rsi':rsi_v,
+        'ret20':ret20,
+        'ret60':ret60,
+        'vol_rel':vol_rel,
+        'stretched':stretched,
+        'very_stretched':very_stretched,
+    }
+
+
 def _short_action(a, holding=False):
     s,_=_quick_scores(a)
+    ctx=_short_context(a)
+
+    # Uma tendência forte pode estar demasiado esticada para uma nova entrada.
+    # Para uma posição já detida, isto não é por si só motivo para vender.
     if a['tech_label']=='Forte' and s>=72:
+        if ctx['very_stretched']:
+            return ('MANTER / NÃO REFORÇAR AGORA' if holding else 'MUITO FORTE, MAS ESTICADA — AGUARDAR'), s
+        if ctx['stretched']:
+            return ('MANTER / AGUARDAR PARA REFORÇAR' if holding else 'FORTE, MAS ESTICADA — AGUARDAR MELHOR ENTRADA'), s
         return ('MANTER / REFORÇO TÁTICO' if holding else 'CANDIDATO A ENTRADA'), s
     if s>=55:
+        if ctx['stretched']:
+            return ('MANTER / NÃO REFORÇAR AGORA' if holding else 'AGUARDAR — PREÇO ESTICADO'), s
         return ('MANTER / AGUARDAR' if holding else 'AGUARDAR'), s
     return ('REDUZIR / NÃO REFORÇAR' if holding else 'NÃO ENTRAR AGORA'), s
 
@@ -1005,14 +1239,12 @@ def _long_action(a, holding=False):
 
 
 def _short_evidence(a):
-    r=a['row']
-    price=float(r['Close'])
-    trend='acima' if price>float(r['EMA200']) else 'abaixo'
-    vol_rel=(float(r['Volume'])/float(r['VOL20'])) if float(r['VOL20'])>0 else None
+    ctx=_short_context(a)
+    vol_txt=_fmt_num(ctx['vol_rel'],2,'×')
     return [
-        f'Tendência: preço {trend} da EMA200',
-        f'Momentum: 20d {_fmt_num(r["RET20"],1,"%")} · 60d {_fmt_num(r["RET60"],1,"%")}',
-        f'RSI {_fmt_num(r["RSI14"],1)} · volume {_fmt_num(vol_rel,2,"×")} da média',
+        f"{ctx['trend']} — preço {'acima' if float(a['row']['Close'])>float(a['row']['EMA200']) else 'abaixo'} da EMA200",
+        f"{ctx['momentum']} — 20d {_fmt_num(ctx['ret20'],1,'%')} · 60d {_fmt_num(ctx['ret60'],1,'%')}",
+        f"RSI {_fmt_num(ctx['rsi'],1)}: {ctx['rsi_label']} · {ctx['volume_label']} ({vol_txt} da média)",
     ]
 
 
@@ -1188,7 +1420,7 @@ def _top_cards(df, rows, horizon, n=5):
         )
 
 
-st.caption('Modo simples: decisão primeiro, 3 evidências no máximo e detalhe apenas quando pedes.')
+st.caption('Modo simples: decisão prática primeiro, 3 evidências interpretadas e detalhe apenas quando pedes.')
 TABS = st.tabs(['Hoje', 'Carteira', 'Analisar'])
 
 with TABS[0]:
@@ -1238,7 +1470,7 @@ with TABS[0]:
 
         hshort,hlong=st.tabs(['Curto prazo', 'Longo prazo'])
         with hshort:
-            st.caption('5–30 dias de mercado · técnica, momentum, RSI e volume.')
+            st.caption('5–30 dias de mercado · a app interpreta tendência, momentum, RSI e volume e evita confundir força com bom ponto de entrada.')
             _top_cards(short,rows,'curto',5)
             with st.expander('Ver Top 10 curto prazo'):
                 st.dataframe(_compact_table(short,'curto'),hide_index=True,use_container_width=True)
@@ -1290,6 +1522,44 @@ with TABS[0]:
 
 with TABS[1]:
     st.subheader('Minha carteira')
+    status=st.session_state.get('persistence_status','Apenas sessão')
+    if status=='Ligado':
+        last=st.session_state.get('persistence_last_save')
+        msg='Dados permanentes: **Ligado**' + (f' · última gravação {last}' if last else '')
+        st.success(msg)
+    elif status=='Erro':
+        st.error('Dados permanentes: erro de ligação. A sessão continua a funcionar, mas as alterações podem não sobreviver a um reinício.')
+        with st.expander('Ver erro de armazenamento'):
+            st.code(st.session_state.get('persistence_error','Erro desconhecido'))
+    else:
+        st.warning('Dados permanentes: **não configurados**. A carteira fica apenas nesta sessão. Configura o Supabase nos Secrets do Streamlit para guardar automaticamente.')
+        with st.expander('Como ativar a gravação permanente'):
+            st.markdown('''
+1. Cria um projeto gratuito no **Supabase**.
+2. Executa o ficheiro `supabase_setup.sql` no SQL Editor do projeto.
+3. No Streamlit Cloud abre **App settings → Secrets** e adiciona:
+```toml
+SUPABASE_URL = "https://SEU-PROJETO.supabase.co"
+SUPABASE_SECRET_KEY = "sb_secret_..."
+PORTFOLIO_OWNER_ID = "carteira-principal"
+APP_PASSWORD = "uma-palavra-passe-forte"
+```
+4. Guarda os Secrets e reinicia a app. A carteira passa a carregar e gravar automaticamente.
+
+**Não coloques a chave secreta nem a palavra-passe no GitHub.** Devem existir apenas nos Secrets do Streamlit.
+''')
+
+    cstore1,cstore2=st.columns(2)
+    with cstore1:
+        if st.button('Guardar carteira agora',use_container_width=True,key='persist_save_now'):
+            if save_persistent_state(show_error=True):
+                st.success('Carteira e histórico guardados permanentemente.')
+    with cstore2:
+        if st.button('Recarregar dados guardados',use_container_width=True,key='persist_reload_now',disabled=not persistence_enabled()):
+            load_persistent_state(force=True)
+            st.success('Dados permanentes recarregados.')
+            st.rerun()
+
     st.caption('A pergunta principal aqui é simples: manter, reforçar, aguardar ou rever?')
 
     with st.expander('➕ Adicionar posição'):
@@ -1325,7 +1595,8 @@ with TABS[1]:
                     st.error('O CSV precisa de: Ticker XTB, Quantidade e Preço médio.')
                 else:
                     st.session_state.portfolio_input=imp.to_dict('records')
-                    st.success('Carteira importada.')
+                    save_persistent_state(show_error=True)
+                    st.success('Carteira importada e guardada.')
             except Exception as e:
                 st.error(str(e))
         pexport=pd.DataFrame(st.session_state.portfolio_input)
