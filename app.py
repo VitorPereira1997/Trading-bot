@@ -1,5 +1,6 @@
 import math
 import html
+import io
 import json
 import urllib.request
 import urllib.error
@@ -49,6 +50,7 @@ def _clear_user_session(clear_auth=False):
         'alerts','portfolio_rows','persistence_status','persistence_last_save','persistence_error',
         '_persistent_loaded','v14_portfolio_rows','v14_hist_revalued','v14_port_detail_result',
         'comparison_df','comparison_time','v14_scan_rows','v20_scan_time','v14_analysis','v14_analysis_detail',
+        'report_parsed','report_result','report_file_name',
     }
     prefixes=('alert_','risk_','decision_stats_')
     for key in list(st.session_state.keys()):
@@ -2328,6 +2330,390 @@ def entry_zone(a, valuation=None):
     return {'low':low,'high':high,'deep':deep,'status':status,'anchor':anchor}
 
 
+# -----------------------------------------------------------------------------
+# Analisador de relatórios PDF (InvestingPro Research)
+# -----------------------------------------------------------------------------
+
+def _pdf_clean_text(text):
+    text=str(text or '').replace('\u00a0',' ').replace('\u2011','-').replace('\u2013','-').replace('\u2014','-')
+    text=re.sub(r'[ \t]+',' ',text)
+    text=re.sub(r'\n{3,}','\n\n',text)
+    return text.strip()
+
+
+def _extract_pdf_pages(uploaded_file):
+    """Extrai texto de PDF digital. Não faz OCR nem inventa conteúdo ausente."""
+    try:
+        from pypdf import PdfReader
+    except Exception as e:
+        raise RuntimeError('Falta a dependência pypdf. Atualiza o requirements.txt da v26.') from e
+    raw=uploaded_file.getvalue() if hasattr(uploaded_file,'getvalue') else bytes(uploaded_file)
+    reader=PdfReader(io.BytesIO(raw))
+    pages=[]
+    for page in reader.pages:
+        try:
+            pages.append(_pdf_clean_text(page.extract_text() or ''))
+        except Exception:
+            pages.append('')
+    full='\n\n'.join(pages)
+    if len(re.sub(r'\s+','',full)) < 300:
+        raise ValueError('O PDF tem pouco texto pesquisável. Esta versão lê PDFs digitais; um PDF digitalizado precisa de OCR.')
+    return pages,full
+
+
+def _rx_value(text, pattern, flags=re.I):
+    m=re.search(pattern,text,flags)
+    if not m:
+        return None
+    try:
+        return float(str(m.group(1)).replace(',',''))
+    except Exception:
+        return None
+
+
+def _rx_text(text, pattern, flags=re.I):
+    m=re.search(pattern,text,flags)
+    return str(m.group(1)).strip() if m else None
+
+
+def _money_abs(value):
+    if value is None:
+        return None
+    raw=str(value).strip().upper().replace('$','').replace(',','')
+    m=re.match(r'^(-?[0-9]*\.?[0-9]+)\s*([KMBT]?)$',raw)
+    if not m:
+        return None
+    n=float(m.group(1)); unit=m.group(2)
+    mult={'':1.0,'K':1e3,'M':1e6,'B':1e9,'T':1e12}.get(unit,1.0)
+    return n*mult
+
+
+def _report_sentence_candidates(text, positive=True, limit=4):
+    clean=str(text or '')
+    clean=re.sub(r'page\s+\d+/\d+',' ',clean,flags=re.I)
+    clean=re.sub(r'\b(?:Bull Case|Bear Case|Additional Insights|SWOT Analysis|Latest Insights|Strengths|Weaknesses|Opportunities|Threats)\b',' ',clean,flags=re.I)
+    clean=re.sub(r'\s+',' ',clean)
+    sentences=re.split(r'(?<=[.!?])\s+',clean)
+    pos=['raised','growth','grew','cash','no funded debt','strong','record','beat','upward','moat','customers','guidance','opportunity','expansion','profitable','return on equity']
+    neg=['risk','declined','pressure','concentration','overvalued','tightness','volatile','threat','delay','slowdown','compress','competition','inventory','headwind']
+    words=pos if positive else neg
+    scored=[]
+    for sent in sentences:
+        sent=re.sub(r'^.*?Pro Research\s+','',sent,flags=re.I).strip()
+        low=sent.lower()
+        score=sum(1 for w in words if w in low)
+        if score and 40 <= len(sent) <= 420:
+            scored.append((score,len(sent),sent.strip()))
+    scored=sorted(scored,key=lambda x:(-x[0],x[1]))
+    out=[]
+    for _,_,sent in scored:
+        if sent not in out:
+            out.append(sent)
+        if len(out)>=limit:
+            break
+    return out
+
+
+def parse_investingpro_report(pages, full_text):
+    text=_pdf_clean_text(full_text)
+    flat=re.sub(r'\s+',' ',text)
+    first=re.sub(r'\s+',' ',pages[0] if pages else '')
+    peer=re.sub(r'\s+',' ',pages[5] if len(pages)>5 else '')
+    header=re.search(r'(.+?)\s*\((NYSE|NASDAQ|AMEX|LSE|XETRA|EPA|BIT|BME|SWX|EURONEXT)\s*:\s*([A-Z0-9.\-]+)\)',first,re.I)
+    if not header:
+        header=re.search(r'(.+?)\s*\([^:()]+\s*:\s*([A-Z0-9.\-]+)\)',first,re.I)
+        company=header.group(1).strip() if header else None
+        ticker=header.group(2).upper().strip() if header else None
+        exchange=None
+    else:
+        company=header.group(1).strip(); exchange=header.group(2).upper(); ticker=header.group(3).upper().strip()
+    if company:
+        company=re.sub(r'\s+',' ',company).strip()
+    report_date=_rx_text(first,r'Date:\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})')
+    report_price=_rx_value(first,r'Stock Price\s*\$?([0-9.,]+)')
+    market_cap_raw=_rx_text(first,r'Market Cap\s*\$?([0-9.,]+\s*[KMBT])')
+    revenue_raw=_rx_text(first,r'Revenue\s*\$?([0-9.,]+\s*[KMBT])')
+    revenue_forecast_raw=_rx_text(first,r'Revenue Forecast\s*\$?([0-9.,]+\s*[KMBT])')
+    analyst_avg=_rx_value(first,r'Analyst Avg\.\s*\(([0-9.,]+)\)')
+    analyst_low=_rx_value(first,r'Analyst Low\s*\(([0-9.,]+)\)')
+    analyst_high=_rx_value(first,r'Analyst High\s*\(([0-9.,]+)\)')
+    # Alguns campos aparecem na página 1 numa ordem visual diferente da ordem textual.
+    # O painel visual apresenta três ratings sequenciais: Growth, Profitability e Cash Flow.
+    vals=[float(x) for x in re.findall(r'([0-9]+(?:\.[0-9]+)?)/10',first)]
+    growth_rating=vals[0] if len(vals)>0 else None
+    profitability_rating=vals[1] if len(vals)>1 else None
+    cashflow_rating=vals[2] if len(vals)>2 else None
+    financial_health=None
+
+
+    analyst_count=None
+    if len(pages)>2:
+        p3=re.sub(r'\s+',' ',pages[2])
+        year=(report_date[-4:] if report_date and len(report_date)>=4 else r'20\d{2}')
+        m=re.search(rf'{year}\s+[0-9.]+\s+[0-9.]+%\s+[0-9.]+x\s+(\d+)',p3,re.I)
+        if m: analyst_count=int(m.group(1))
+
+    eps_up=eps_down=None
+    m=re.search(r'EPS\s*Revisions\s*\(90d\).*?(\d+)\s*[^0-9]+\s*(\d+)',first,re.I)
+    if m:
+        eps_up=int(m.group(1)); eps_down=int(m.group(2))
+
+    report={
+        'format':'InvestingPro Research' if 'Pro Research' in text and 'Investing' in text else 'PDF financeiro',
+        'company':company,'ticker':ticker,'exchange':exchange,'report_date':report_date,'report_price':report_price,
+        'market_cap':_money_abs(market_cap_raw),'revenue':_money_abs(revenue_raw),'revenue_forecast':_money_abs(revenue_forecast_raw),
+        'pe':_rx_value(first,r'P/E Ratio\s*([0-9.,]+)'),
+        'forward_pe':_rx_value(first,r'P/E\s*\(Fwd\.\)\s*([0-9.,]+)'),
+        'peg':_rx_value(first,r'PEG Ratio\s*([0-9.,]+)'),
+        'fcf_yield':_rx_value(first,r'FCF Yield\s*([0-9.,]+)'),
+        'ev_ebitda':_rx_value(first,r'EV\s*/\s*EBITDA\s*([0-9.,]+)'),
+        'beta':_rx_value(first,r'Beta\s*\(5Y\)\s*([0-9.,]+)'),
+        'eps_actual':_rx_value(first,r'EPS Actual\s*([0-9.,]+)'),
+        'eps_estimate':_rx_value(first,r'EPS Estimate\s*([0-9.,]+)'),
+        'fair_value':_rx_value(first,r'Fair Value\s*\$([0-9.,]+)'),
+        'financial_health':financial_health,'growth_rating':growth_rating,'profitability_rating':profitability_rating,'cashflow_rating':cashflow_rating,
+        'analyst_avg':analyst_avg,'analyst_low':analyst_low,'analyst_high':analyst_high,'analyst_count':analyst_count,
+        'eps_revisions_up':eps_up,'eps_revisions_down':eps_down,
+        'pdf_technical':_rx_text(peer,r'Technical Summary\s*(Strong Sell|Sell|Neutral|Buy|Strong Buy)'),
+        'revenue_growth_pct':_rx_value(peer,r'Revenue Growth\s*(-?[0-9.,]+)%'),
+        'revenue_cagr_5y_pct':_rx_value(peer,r'Revenue CAGR\s*\(5y\)\s*(-?[0-9.,]+)%'),
+        'net_income_growth_pct':_rx_value(peer,r'Net Income Growth\s*(-?[0-9.,]+)%'),
+        'net_income_cagr_5y_pct':_rx_value(peer,r'Net\s*Income\s*CAGR\s*\(5y\)\s*(-?[0-9.,]+)%'),
+        'revenue_forecast_cagr_5y_pct':_rx_value(peer,r'Revenue\s*Forecast\s*CAGR\s*\(5y\)\s*(-?[0-9.,]+)%'),
+        'net_income_forecast_cagr_5y_pct':_rx_value(peer,r'Net\s*Income\s*Forecast\s*CAGR\s*\(5y\)\s*(-?[0-9.,]+)%'),
+        'gross_margin_pct':_rx_value(peer,r'Gross Profit Margin\s*(-?[0-9.,]+)'),
+        'roe_pct':_rx_value(peer,r'\bROE\s*(-?[0-9.,]+)'),
+        'roa_pct':_rx_value(peer,r'\bROA\s*(-?[0-9.,]+)'),
+        'analyst_upside_report_pct':_rx_value(peer,r'Analyst Upside\s*(-?[0-9.,]+)%'),
+        'fair_value_upside_report_pct':_rx_value(peer,r'Fair Value Upside\s*(-?[0-9.,]+)%'),
+    }
+    debt_raw=_rx_text(peer,r'Total Debt\s*\$?([0-9.,]+\s*[KMBT]?)')
+    report['total_debt']=_money_abs(debt_raw)
+    opm=_rx_value(flat,r'Operating margin reached\s*([0-9.,]+)%')
+    report['operating_margin_pct']=opm
+    cash_raw=_rx_text(flat,r'holds\s*\$?([0-9.,]+\s*[KMBT])\s+in cash')
+    report['cash']=_money_abs(cash_raw)
+    ocf_raw=None
+    if len(pages)>3:
+        p4=re.sub(r'\s+',' ',pages[3])
+        m=re.search(r'Cash from\s*Operations\s+([0-9.,]+)\s+([0-9.,]+)\s+([0-9.,]+)\s+([0-9.,]+)\s+([0-9.,]+)',p4,re.I)
+        if m:
+            ocf_raw=m.group(5)+'M'
+        revm=re.search(r'Income Statement.*?Revenue\s+([0-9.,]+)\s+([0-9.,]+)\s+([0-9.,]+)\s+([0-9.,]+)\s+([0-9.,]+)',p4,re.I|re.S)
+        nim=re.search(r'Net Income to\s*Stockholders\s+([0-9.,]+)\s+([0-9.,]+)\s+([0-9.,]+)\s+([0-9.,]+)\s+([0-9.,]+)',p4,re.I)
+        if revm and nim:
+            try:
+                rev_ltm=float(revm.group(5).replace(',',''))
+                ni_ltm=float(nim.group(5).replace(',',''))
+                report['profit_margin_pct']=ni_ltm/rev_ltm*100 if rev_ltm>0 else None
+            except Exception:
+                report['profit_margin_pct']=None
+    report['operating_cashflow']=_money_abs(ocf_raw)
+    report.setdefault('profit_margin_pct',None)
+
+    warnings=[]
+    if report.get('report_price') and report.get('fair_value') and report.get('fair_value_upside_report_pct') is not None:
+        calc=(float(report['fair_value'])/float(report['report_price'])-1)*100
+        if abs(calc-float(report['fair_value_upside_report_pct']))>3:
+            warnings.append(f"Fair Value/Preço do PDF implicam {calc:+.1f}%, diferente do Fair Value Upside apresentado ({float(report['fair_value_upside_report_pct']):+.1f}%).")
+    report['warnings']=warnings
+
+    report['positive_points']=_report_sentence_candidates('\n'.join(pages[:9]),True,5)
+    report['risk_points']=_report_sentence_candidates('\n'.join(pages[:9]),False,5)
+    report['pages']=len(pages)
+    keys=['report_price','pe','forward_pe','peg','fcf_yield','ev_ebitda','fair_value','financial_health','revenue_growth_pct','net_income_growth_pct','roe_pct','gross_margin_pct','analyst_avg','analyst_count']
+    report['coverage_pct']=round(sum(report.get(k) is not None for k in keys)/len(keys)*100,1)
+    return report
+
+
+def _report_xtb_ticker(report):
+    ticker=str(report.get('ticker') or '').upper().strip()
+    exch=str(report.get('exchange') or '').upper()
+    if not ticker:
+        return None
+    if exch in ['NYSE','NASDAQ','AMEX']:
+        return ticker+'.US'
+    return ticker
+
+
+def _portfolio_holds_ticker(xtb_ticker, source_ticker=None):
+    xtb=str(xtb_ticker or '').upper().strip(); source=str(source_ticker or '').upper().strip()
+    for r in st.session_state.get('portfolio_input',[]) or []:
+        rt=str(r.get('Ticker XTB') or '').upper().strip()
+        rs=str(r.get('Ticker técnico') or '').upper().strip()
+        if rt and rt==xtb:
+            return True
+        if source and (rt==source or rs==source):
+            return True
+    return False
+
+
+def _analysis_with_report(a, report):
+    """Recalcula fundamentais usando o PDF como evidência, sem mexer na técnica atual."""
+    info=dict(a.get('info') or {})
+    derived_fcf=None
+    if report.get('market_cap') is not None and report.get('fcf_yield') is not None:
+        derived_fcf=float(report['market_cap'])*float(report['fcf_yield'])/100.0
+    mapping={
+        'marketCap':report.get('market_cap'),
+        'trailingPE':report.get('pe'),
+        'forwardPE':report.get('forward_pe'),
+        'enterpriseToEbitda':report.get('ev_ebitda'),
+        'investingFcfYield':report.get('fcf_yield'),
+        'investingFairValue':report.get('fair_value'),
+        'investingHealthScore':report.get('financial_health'),
+        'returnOnEquity':(report.get('roe_pct')/100 if report.get('roe_pct') is not None else None),
+        'revenueGrowth':(report.get('revenue_growth_pct')/100 if report.get('revenue_growth_pct') is not None else None),
+        'earningsGrowth':(report.get('net_income_growth_pct')/100 if report.get('net_income_growth_pct') is not None else None),
+        'operatingMargins':(report.get('operating_margin_pct')/100 if report.get('operating_margin_pct') is not None else None),
+        'profitMargins':(report.get('profit_margin_pct')/100 if report.get('profit_margin_pct') is not None else None),
+        'freeCashflow':derived_fcf,
+        'operatingCashflow':report.get('operating_cashflow'),
+        'totalDebt':report.get('total_debt'),
+        'totalCash':report.get('cash'),
+        'targetMeanPrice':report.get('analyst_avg'),
+        'numberOfAnalystOpinions':report.get('analyst_count'),
+    }
+    if report.get('total_debt') == 0:
+        mapping['debtToEquity']=0.0
+    for key,val in mapping.items():
+        if val is not None and np.isfinite(val):
+            info[key]=float(val)
+    # Margem líquida aproximada só é usada quando o relatório dá valores LTM de receita/lucro de forma consistente.
+    a2=dict(a); a2['info']=info
+    if a2.get('kind')=='Ação':
+        label,score,complete,table=fundamental_equity(info)
+        a2['fund_label']=label; a2['fund_score']=score; a2['fund_complete']=complete; a2['fund_table']=table
+    return a2
+
+
+def _report_valuation_score(report, a):
+    price=float(a['row']['Close']); parts=[]
+    fair=_safe_float(report.get('fair_value'))
+    if fair and price>0:
+        upside=(fair/price-1)*100
+        parts.append((_norm(upside,-25,35),0.45,'Fair Value'))
+    peg=_safe_float(report.get('peg'))
+    if peg and peg>0:
+        parts.append((_metric_score(peg,3.5,1.0,False),0.20,'PEG'))
+    fpe=_safe_float(report.get('forward_pe'))
+    growth=_safe_float(report.get('net_income_forecast_cagr_5y_pct')) or _safe_float(report.get('revenue_forecast_cagr_5y_pct'))
+    if fpe and growth and growth>0:
+        ratio=fpe/growth
+        parts.append((_metric_score(ratio,2.2,0.8,False),0.20,'Forward P/E / crescimento'))
+    fy=_safe_float(report.get('fcf_yield'))
+    if fy is not None:
+        parts.append((_metric_score(fy,1.0,5.0,True),0.15,'FCF yield'))
+    valid=[(v,w,n) for v,w,n in parts if v is not None]
+    if not valid:
+        return None,[]
+    score=sum(v*w for v,w,_ in valid)/sum(w for _,w,_ in valid)
+    return round(score,1),[(n,round(v,1)) for v,_,n in valid]
+
+
+def _report_analyst_score(report, a):
+    price=float(a['row']['Close']); target=_safe_float(report.get('analyst_avg')); n=_safe_float(report.get('analyst_count'))
+    parts=[]
+    if target and price>0 and (n is None or n>=3):
+        upside=(target/price-1)*100
+        parts.append((_norm(upside,-20,45),0.70))
+    up=_safe_float(report.get('eps_revisions_up')); down=_safe_float(report.get('eps_revisions_down'))
+    if up is not None and down is not None and up+down>0:
+        parts.append((up/(up+down)*100,0.30))
+    valid=[(v,w) for v,w in parts if v is not None]
+    return round(sum(v*w for v,w in valid)/sum(w for _,w in valid),1) if valid else None
+
+
+def _report_decision(a, report, holding=False):
+    fund_raw=_safe_float(a.get('fund_score')); tech=_safe_float(a.get('tech_score'))
+    rating_values=[_safe_float(report.get(k)) for k in ['growth_rating','profitability_rating','cashflow_rating']]
+    rating_values=[x*10 for x in rating_values if x is not None]
+    rating_score=float(np.mean(rating_values)) if rating_values else None
+    if fund_raw is not None and rating_score is not None:
+        fund=round(0.65*fund_raw+0.35*rating_score,1)
+    else:
+        fund=fund_raw if fund_raw is not None else rating_score
+    if fund is not None:
+        fund=min(96.0,float(fund))
+    val,val_parts=_report_valuation_score(report,a)
+    analyst=_report_analyst_score(report,a)
+    parts=[]
+    for value,weight in [(fund,0.40),(val,0.25),(tech,0.25),(analyst,0.10)]:
+        if value is not None: parts.append((value,weight))
+    overall=round(sum(v*w for v,w in parts)/sum(w for _,w in parts),1) if parts else None
+    if holding:
+        if fund is not None and fund<45 and tech is not None and tech<45:
+            action='VENDER / REDUZIR'
+        elif fund is not None and fund>=72 and val is not None and val>=65 and tech is not None and tech>=65:
+            action='REFORÇAR'
+        elif fund is not None and fund>=55:
+            action='MANTER'
+        else:
+            action='REVER / REDUZIR'
+    else:
+        if fund is not None and fund>=72 and val is not None and val>=58 and tech is not None and tech>=62 and (overall or 0)>=68:
+            action='COMPRAR'
+        else:
+            action='AGUARDAR'
+    coverage=float(report.get('coverage_pct') or 0)
+    fund_comp=float(a.get('fund_complete') or 0)
+    confidence=max(0,min(90,0.55*coverage+0.45*fund_comp))
+    report_age_days=None
+    try:
+        if report.get('report_date'):
+            report_dt=datetime.strptime(str(report['report_date']),'%b %d, %Y')
+            report_age_days=max(0,(datetime.now()-report_dt).days)
+            if report_age_days>180: confidence-=20
+            elif report_age_days>90: confidence-=10
+            elif report_age_days>45: confidence-=5
+    except Exception:
+        pass
+    confidence=round(max(0,min(90,confidence)),0)
+    if confidence>=80: conf_label='Alta'
+    elif confidence>=60: conf_label='Média-alta'
+    elif confidence>=45: conf_label='Média'
+    else: conf_label='Baixa'
+    return {'action':action,'overall':overall,'fundamental':fund,'valuation':val,'technical':tech,'analysts':analyst,'confidence':confidence,'confidence_label':conf_label,'valuation_parts':val_parts,'report_age_days':report_age_days}
+
+
+def _report_summary_reasons(a, report, decision):
+    reasons=[]
+    fund=decision.get('fundamental'); val=decision.get('valuation'); tech=decision.get('technical')
+    rg=_safe_float(report.get('revenue_growth_pct')); roe=_safe_float(report.get('roe_pct'))
+    if fund is not None and fund>=70:
+        txt=f'Fundamentais fortes ({fund:.0f}/100)'
+        extras=[]
+        if rg is not None: extras.append(f'receitas +{rg:.1f}%')
+        if roe is not None: extras.append(f'ROE {roe:.1f}%')
+        if extras: txt+=' - '+', '.join(extras)
+        reasons.append(txt)
+    elif fund is not None:
+        reasons.append(f'Qualidade fundamental {fund:.0f}/100, sem margem para uma conclusão forte')
+    if val is not None:
+        reasons.append(('Avaliação atrativa' if val>=65 else ('Avaliação equilibrada' if val>=50 else 'Avaliação exigente'))+f' ({val:.0f}/100)')
+    if tech is not None:
+        short,_=_short_action(a,holding=False)
+        reasons.append(f'Técnica atual {tech:.0f}/100 - {short}')
+    return reasons[:3]
+
+
+def build_report_analysis(uploaded_file):
+    pages,text=_extract_pdf_pages(uploaded_file)
+    report=parse_investingpro_report(pages,text)
+    if not report.get('ticker'):
+        raise ValueError('Não consegui identificar o ticker no PDF. O formato esperado é semelhante a InvestingPro Research.')
+    xtb=_report_xtb_ticker(report)
+    if not xtb:
+        raise ValueError('Ticker identificado, mas não foi possível mapear o instrumento para análise de mercado.')
+    a=analyze_asset(xtb,detailed=False,instrument_type='Ação')
+    a=_analysis_with_report(a,report)
+    holding=_portfolio_holds_ticker(xtb,a.get('source_ticker'))
+    decision=_report_decision(a,report,holding)
+    valuation=valuation_scenarios(a)
+    zone=entry_zone(a,valuation)
+    return {'report':report,'analysis':a,'decision':decision,'holding':holding,'valuation':valuation,'zone':zone,'pages':pages}
+
+
 def _portfolio_health_report(rows):
     good=[r for r in rows if isinstance(r,dict) and r.get('_analysis')]
     invest=[r for r in good if r.get('Tipo instrumento')!='CFD']
@@ -2719,7 +3105,7 @@ def _comparison_metric_card(label, ticker, note=''):
         st.caption(note)
 
 st.caption('Modo simples: decisão prática primeiro, 3 evidências interpretadas e detalhe apenas quando pedes.')
-PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Risco', 'Analisar', 'Comparar'], horizontal=True, label_visibility='collapsed', key='main_page')
+PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Risco', 'Analisar', 'Relatório', 'Comparar'], horizontal=True, label_visibility='collapsed', key='main_page')
 
 if PAGE == 'Hoje':
     st.subheader('Dashboard de oportunidades')
@@ -3178,6 +3564,162 @@ elif PAGE == 'Risco':
         st.info('Ainda não tens posições registadas nesta conta.')
 
 
+elif PAGE == 'Relatório':
+    st.subheader('Analisar relatório')
+    st.caption('Carrega um relatório InvestingPro em PDF. A app usa o PDF para fundamentais/avaliação e recalcula a técnica com preços atuais.')
+    if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
+        load_persistent_state()
+
+    report_file=st.file_uploader('Relatório PDF',type=['pdf'],key='report_pdf_upload')
+    c1,c2=st.columns([2,1])
+    with c1:
+        run_report=st.button('Analisar relatório',type='primary',use_container_width=True,key='report_run',disabled=(report_file is None))
+    with c2:
+        if st.button('Limpar',use_container_width=True,key='report_clear'):
+            for k in ['report_parsed','report_result','report_file_name']:
+                st.session_state.pop(k,None)
+            st.rerun()
+
+    if run_report and report_file is not None:
+        try:
+            with st.spinner('A ler o PDF, cruzar os fundamentais e recalcular a técnica atual...'):
+                result=build_report_analysis(report_file)
+            st.session_state['report_result']=result
+            st.session_state['report_parsed']=result['report']
+            st.session_state['report_file_name']=report_file.name
+        except Exception as e:
+            st.error(str(e))
+
+    rr=st.session_state.get('report_result')
+    if rr:
+        report=rr['report']; a=rr['analysis']; dec=rr['decision']; holding=rr['holding']; val=rr['valuation']; zone=rr['zone']
+        st.markdown(f"## {a['xtb_ticker']} · {report.get('company') or a['company']}")
+        st.caption(f"PDF: {st.session_state.get('report_file_name','')} · relatório {report.get('report_date') or 'data N/D'} · técnica atual até {a['df'].index[-1].date()}")
+        for w in report.get('warnings',[]) or []:
+            st.warning('Verificação do PDF: '+w)
+
+        action=dec['action']
+        reasons=_report_summary_reasons(a,report,dec)
+        _asset_card(a['xtb_ticker'],report.get('company') or a['company'],action,dec.get('overall'),reasons,float(a['row']['Close']),a['currency'],('Já em carteira' if holding else 'Ainda não registada na carteira'))
+
+        if holding:
+            st.success(f"**Decisão para a posição atual: {action}** · qualidade/cobertura da análise {dec['confidence_label']} ({dec['confidence']:.0f}%).")
+        else:
+            st.info(f"**Decisão para nova entrada: {action}** · qualidade/cobertura da análise {dec['confidence_label']} ({dec['confidence']:.0f}%).")
+
+        st.caption('A percentagem acima mede cobertura/qualidade dos dados usados; não é probabilidade de retorno nem de acerto da decisão.')
+
+        k1,k2,k3,k4=st.columns(4)
+        k1.metric('Fundamental',_fmt_num(dec.get('fundamental'),0,'/100'))
+        k2.metric('Avaliação',_fmt_num(dec.get('valuation'),0,'/100'))
+        k3.metric('Técnica atual',_fmt_num(dec.get('technical'),0,'/100'))
+        k4.metric('Analistas',_fmt_num(dec.get('analysts'),0,'/100'))
+
+        st.markdown('### Resumo')
+        for reason in reasons:
+            st.write('• '+reason)
+        current=float(a['row']['Close'])
+        fair=_safe_float(report.get('fair_value')); target=_safe_float(report.get('analyst_avg'))
+        if fair:
+            st.write(f"• Fair Value do PDF: **{fair:.2f} {a['currency']}** ({(fair/current-1)*100:+.1f}% vs preço atual da análise).")
+        if target:
+            st.write(f"• Alvo médio de analistas no PDF: **{target:.2f} {a['currency']}** ({(target/current-1)*100:+.1f}% vs preço atual da análise).")
+        st.write(f"• Zona técnica potencial: **{zone['low']:.2f}-{zone['high']:.2f} {a['currency']}** · {zone['status']}.")
+
+        if action in ['AGUARDAR','MANTER']:
+            st.markdown('**O que faria melhorar a decisão**')
+            st.write('Melhoria do timing técnico e/ou maior margem de segurança na avaliação, mantendo crescimento, margens e balanço sólidos.')
+        elif action=='COMPRAR':
+            st.markdown('**O que invalidaria a compra**')
+            st.write('Deterioração material dos fundamentais, quebra da tendência de longo prazo ou perda da margem de segurança que sustentou a entrada.')
+        elif 'VENDER' in action or 'REDUZIR' in action:
+            st.markdown('**Porque a decisão é defensiva**')
+            st.write('A regra exige deterioração suficientemente forte dos fundamentais e/ou da técnica; não vende apenas porque o preço caiu.')
+
+        tf,ta,tt,tr,td=st.tabs(['Fundamentais','Avaliação','Técnica','Riscos & catalisadores','Dados do PDF'])
+        with tf:
+            st.markdown('#### Leitura fundamental')
+            f1,f2,f3=st.columns(3)
+            f1.metric('Qualidade',f"{a['fund_label']} · {_fmt_num(a.get('fund_score'),0,'/100')}")
+            f2.metric('Cobertura',_fmt_num(a.get('fund_complete'),0,'%'))
+            pro_ratings=[_safe_float(report.get(k)) for k in ['growth_rating','profitability_rating','cashflow_rating']]
+            pro_ratings=[x for x in pro_ratings if x is not None]
+            f3.metric('Média ratings Pro',_fmt_num(float(np.mean(pro_ratings)) if pro_ratings else None,1,'/10'))
+            metrics=pd.DataFrame([
+                ['Crescimento receitas',report.get('revenue_growth_pct'),'%',6],
+                ['CAGR receitas 5A',report.get('revenue_cagr_5y_pct'),'%',6],
+                ['Crescimento lucro líquido',report.get('net_income_growth_pct'),'%',6],
+                ['CAGR receitas previsto 5A',report.get('revenue_forecast_cagr_5y_pct'),'%',6],
+                ['ROE',report.get('roe_pct'),'%',6],
+                ['Margem bruta',report.get('gross_margin_pct'),'%',6],
+                ['Margem operacional',report.get('operating_margin_pct'),'%',1],
+                ['Margem líquida LTM',report.get('profit_margin_pct'),'%',4],
+            ],columns=['Métrica','Valor','Unidade','Página'])
+            st.dataframe(metrics.dropna(subset=['Valor']),hide_index=True,use_container_width=True)
+            with st.expander('Critérios do score fundamental'):
+                st.dataframe(a['fund_table'],hide_index=True,use_container_width=True)
+
+        with ta:
+            st.markdown('#### Avaliação')
+            av1,av2,av3=st.columns(3)
+            av1.metric('P/E',_fmt_num(report.get('pe'),1,'x'))
+            av2.metric('Forward P/E',_fmt_num(report.get('forward_pe'),1,'x'))
+            av3.metric('EV/EBITDA',_fmt_num(report.get('ev_ebitda'),1,'x'))
+            av4,av5,av6=st.columns(3)
+            av4.metric('PEG',_fmt_num(report.get('peg'),2,'x'))
+            av5.metric('FCF Yield',_fmt_num(report.get('fcf_yield'),2,'%'))
+            av6.metric('Fair Value',f"{fair:.2f} {a['currency']}" if fair else 'N/D')
+            if dec.get('valuation_parts'):
+                st.caption('Componentes do score: '+ ' · '.join(f'{n} {v:.0f}/100' for n,v in dec['valuation_parts']))
+            if val.get('available'):
+                v1,v2,v3=st.columns(3)
+                v1.metric('Cenário conservador',f"{val['conservative']:.2f} {a['currency']}")
+                v2.metric('Cenário base',f"{val['base']:.2f} {a['currency']}")
+                v3.metric('Cenário otimista',f"{val['optimistic']:.2f} {a['currency']}")
+                st.caption(val['method'])
+
+        with tt:
+            st.markdown('#### Técnica atual - recalculada pela app')
+            short_action,short_score=_short_action(a,holding=holding)
+            _asset_card(a['xtb_ticker'],a['company'],short_action,short_score,_short_evidence(a),float(a['row']['Close']),a['currency'],'Dados atuais da fonte de mercado')
+            t1,t2,t3,t4=st.columns(4)
+            t1.metric('RSI',_fmt_num(float(a['row']['RSI14']),1))
+            t2.metric('Retorno 20d',_fmt_num(float(a['row']['RET20']),1,'%'))
+            t3.metric('Retorno 60d',_fmt_num(float(a['row']['RET60']),1,'%'))
+            t4.metric('PDF na data',report.get('pdf_technical') or 'N/D')
+            st.caption('A técnica do PDF é apenas referência histórica. A decisão usa a técnica recalculada com preços atuais.')
+
+        with tr:
+            st.markdown('#### Pontos positivos do relatório')
+            positives=report.get('positive_points') or []
+            if positives:
+                for x in positives: st.write('• '+x)
+            else: st.write('Sem pontos positivos estruturados suficientes no texto extraído.')
+            st.markdown('#### Riscos / pontos de atenção')
+            risks=report.get('risk_points') or []
+            if risks:
+                for x in risks: st.write('• '+x)
+            else: st.write('Sem riscos estruturados suficientes no texto extraído.')
+
+        with td:
+            st.markdown('#### Dados estruturados extraídos')
+            rows=[]
+            labels={
+                'report_date':'Data do relatório','report_price':'Preço no relatório','market_cap':'Capitalização','revenue':'Receitas','revenue_forecast':'Receitas previstas',
+                'pe':'P/E','forward_pe':'Forward P/E','peg':'PEG','fcf_yield':'FCF Yield %','ev_ebitda':'EV/EBITDA','beta':'Beta 5A','fair_value':'Fair Value',
+                'financial_health':'Financial Health /10','growth_rating':'Growth Rating /10','profitability_rating':'Profitability Rating /10','analyst_avg':'Alvo médio analistas',
+                'analyst_low':'Alvo baixo','analyst_high':'Alvo alto','analyst_count':'Nº analistas','eps_revisions_up':'Revisões EPS ↑','eps_revisions_down':'Revisões EPS ↓',
+            }
+            for key,label in labels.items():
+                if report.get(key) is not None:
+                    rows.append({'Campo':label,'Valor':report.get(key)})
+            st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
+            st.caption(f"Cobertura automática do PDF: {report.get('coverage_pct',0):.0f}% · {report.get('pages',0)} páginas. O relatório pode conter dados de terceiros/IA e não é tratado como feed em tempo real.")
+
+    else:
+        st.info('Carrega um PDF InvestingPro e escolhe **Analisar relatório**.')
+
+
 elif PAGE == 'Comparar':
     st.subheader('Comparador de ações')
     st.caption('Compara 2 a 4 ações lado a lado. Primeiro a conclusão; depois os números que a justificam.')
@@ -3442,5 +3984,6 @@ with st.expander('Como ler a app'):
 - **Alvo técnico (2× risco)** não é um valor justo fundamental.
 - Prazo e cenários são comparações históricas, não previsões.
 - **Fontes**: Yahoo Finance é a fonte principal; dados InvestingPro importados servem apenas de fallback para campos em falta e aparecem identificados.
+- **Relatório**: o PDF alimenta a análise fundamental/avaliação; a técnica é recalculada com dados atuais e a app mostra uma decisão resumida no topo.
 - Confirma preço, spread, sessão e informação oficial antes de executar uma ordem.
 ''')
