@@ -15,22 +15,97 @@ import streamlit as st
 
 st.set_page_config(page_title='Carteira Inteligente', page_icon='📊', layout='wide')
 
-# Proteção opcional da aplicação. Recomendado quando a carteira pessoal fica
-# guardada permanentemente num backend. A palavra-passe existe apenas nos Secrets.
+# -----------------------------------------------------------------------------
+# Autenticação multiutilizador
+# -----------------------------------------------------------------------------
+# Para poucos utilizadores conhecidos, as credenciais ficam apenas nos Secrets
+# do Streamlit. Cada utilizador recebe um owner_id independente no Supabase.
+
+def _configured_users():
+    try:
+        raw=st.secrets.get('USERS',{}) or {}
+    except Exception:
+        raw={}
+    out={}
+    try:
+        names=list(raw.keys())
+    except Exception:
+        names=[]
+    for name in names:
+        try:
+            cfg=raw[name]
+            password=str(cfg.get('password','') or '')
+            owner_id=str(cfg.get('owner_id',name) or name).strip()
+            display_name=str(cfg.get('display_name',name) or name).strip()
+            if password and owner_id:
+                out[str(name).strip().lower()]={'username':str(name).strip(),'password':password,'owner_id':owner_id,'display_name':display_name}
+        except Exception:
+            continue
+    return out
+
+def _clear_user_session(clear_auth=False):
+    exact={
+        'watchlist','portfolio_input','decision_history','investingpro_data','investingpro_import_meta',
+        'alerts','portfolio_rows','persistence_status','persistence_last_save','persistence_error',
+        '_persistent_loaded','v14_portfolio_rows','v14_hist_revalued','v14_port_detail_result',
+        'comparison_df','comparison_time','v14_scan_rows','v20_scan_time','v14_analysis','v14_analysis_detail',
+    }
+    prefixes=('alert_','risk_','decision_stats_')
+    for key in list(st.session_state.keys()):
+        if key in exact or any(str(key).startswith(pref) for pref in prefixes):
+            st.session_state.pop(key,None)
+    if clear_auth:
+        for key in ['_app_authenticated','_authenticated_user','_owner_id','_user_display']:
+            st.session_state.pop(key,None)
+
+_USERS=_configured_users()
 try:
     _APP_PASSWORD=str(st.secrets.get('APP_PASSWORD','') or '')
 except Exception:
     _APP_PASSWORD=''
-if _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
+
+if _USERS and not st.session_state.get('_app_authenticated',False):
+    st.title('🔒 Carteira Inteligente')
+    st.caption('Entra com o teu utilizador. Cada conta tem carteira, histórico e dados próprios.')
+    _login_user=st.text_input('Utilizador').strip().lower()
+    _login_pw=st.text_input('Palavra-passe',type='password')
+    if st.button('Entrar',type='primary',use_container_width=True):
+        cfg=_USERS.get(_login_user)
+        if cfg and hmac.compare_digest(str(_login_pw),str(cfg['password'])):
+            _clear_user_session(clear_auth=True)
+            st.session_state['_app_authenticated']=True
+            st.session_state['_authenticated_user']=cfg['username']
+            st.session_state['_owner_id']=cfg['owner_id']
+            st.session_state['_user_display']=cfg['display_name']
+            st.rerun()
+        else:
+            st.error('Utilizador ou palavra-passe incorretos.')
+    st.stop()
+elif (not _USERS) and _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
+    # Compatibilidade com a configuração antiga de uma única palavra-passe.
     st.title('🔒 Carteira Inteligente')
     _pw=st.text_input('Palavra-passe da aplicação',type='password')
     if st.button('Entrar',type='primary',use_container_width=True):
         if hmac.compare_digest(str(_pw),_APP_PASSWORD):
+            _clear_user_session(clear_auth=True)
             st.session_state['_app_authenticated']=True
+            st.session_state['_authenticated_user']='principal'
+            try:
+                st.session_state['_owner_id']=str(st.secrets.get('PORTFOLIO_OWNER_ID','carteira-principal') or 'carteira-principal')
+            except Exception:
+                st.session_state['_owner_id']='carteira-principal'
+            st.session_state['_user_display']='Utilizador principal'
             st.rerun()
         else:
             st.error('Palavra-passe incorreta.')
     st.stop()
+
+if st.session_state.get('_app_authenticated'):
+    st.sidebar.caption(f"👤 {st.session_state.get('_user_display') or st.session_state.get('_authenticated_user') or 'Utilizador'}")
+    if st.sidebar.button('Sair',use_container_width=True,key='logout_user'):
+        _clear_user_session(clear_auth=True)
+        st.rerun()
+
 st.title('📊 Carteira Inteligente')
 st.caption('Curto prazo · Longo prazo · Evidências essenciais. Dados identificados; não envia ordens reais.')
 
@@ -169,6 +244,8 @@ if 'investingpro_data' not in st.session_state:
     st.session_state.investingpro_data = {}
 if 'investingpro_import_meta' not in st.session_state:
     st.session_state.investingpro_import_meta = {}
+if 'alerts' not in st.session_state:
+    st.session_state.alerts = []
 
 # -----------------------------------------------------------------------------
 # Persistência permanente (Supabase)
@@ -186,7 +263,7 @@ def _secret(name, default=None):
 def persistence_config():
     url=str(_secret('SUPABASE_URL','') or '').strip().rstrip('/')
     key=str(_secret('SUPABASE_SECRET_KEY','') or _secret('SUPABASE_SERVICE_ROLE_KEY','') or '').strip()
-    owner=str(_secret('PORTFOLIO_OWNER_ID','') or '').strip()
+    owner=str(st.session_state.get('_owner_id') or _secret('PORTFOLIO_OWNER_ID','') or '').strip()
     return url,key,owner
 
 def persistence_enabled():
@@ -249,6 +326,8 @@ def persistent_state_payload():
     return {
         'portfolio_input':_json_safe(st.session_state.get('portfolio_input',[])),
         'decision_history':_json_safe(st.session_state.get('decision_history',[])),
+        'watchlist':_json_safe(st.session_state.get('watchlist',[])),
+        'alerts':_json_safe(st.session_state.get('alerts',[])),
         'investingpro_data':_json_safe(st.session_state.get('investingpro_data',{})),
         'investingpro_import_meta':_json_safe(st.session_state.get('investingpro_import_meta',{})),
     }
@@ -296,9 +375,19 @@ def load_persistent_state(force=False):
             state=rows[0].get('state') or {}
             st.session_state.portfolio_input=list(state.get('portfolio_input') or [])
             st.session_state.decision_history=list(state.get('decision_history') or [])
+            st.session_state.watchlist=list(state.get('watchlist') or [])
+            st.session_state.alerts=list(state.get('alerts') or [])
             st.session_state.investingpro_data=dict(state.get('investingpro_data') or {})
             st.session_state.investingpro_import_meta=dict(state.get('investingpro_import_meta') or {})
             st.session_state['persistence_last_save']=rows[0].get('updated_at')
+        else:
+            # Um owner_id novo começa sempre vazio; nunca reutiliza dados de outro login.
+            st.session_state.portfolio_input=[]
+            st.session_state.decision_history=[]
+            st.session_state.watchlist=[]
+            st.session_state.alerts=[]
+            st.session_state.investingpro_data={}
+            st.session_state.investingpro_import_meta={}
         st.session_state['persistence_status']='Ligado'
         st.session_state.pop('persistence_error',None)
     except Exception as e:
@@ -1721,7 +1810,11 @@ def revalue_decision_history():
     for h in st.session_state.decision_history:
         row=dict(h)
         try:
-            a=analyze_asset(h['Ticker XTB'], detailed=False)
+            a=analyze_asset(
+                h['Ticker XTB'],detailed=False,
+                instrument_type=h.get('Tipo') or 'Auto',
+                source_override=(str(h.get('Ticker técnico') or '').upper().strip() or None),
+            )
             current=float(a['row']['Close'])
             old=float(h['Preço na decisão'])
             change=(current/old-1)*100 if old>0 else None
@@ -2128,13 +2221,18 @@ def _portfolio_quick_row(r):
     if a.get('kind')=='CFD':
         pnl_pct=None
         pnl_eur=((pe-pm_eur)*q*multiplier if multiplier>0 and pe is not None and pm_eur is not None else None)
+        current_value_eur=None
+        cfd_notional_eur=(pe*q*multiplier if multiplier>0 and pe is not None else None)
     else:
         pnl_pct=movement_pct
         pnl_eur=((pe-pm_eur)*q if pe is not None and pm_eur is not None else None)
+        current_value_eur=(pe*q if pe is not None else None)
+        cfd_notional_eur=None
     return {
         'Ticker XTB':a['xtb_ticker'],'Empresa':a['company'],'Setor':sector_name(a['info']),'Objetivo':objective,
         'Tipo instrumento':a.get('kind'),'Subjacente':a.get('underlying_kind'),'Ticker técnico':a.get('source_ticker'),
         'Preço atual':price,'Moeda':cur,'Quantidade':q,'Preço médio':pm,
+        'Valor atual EUR':current_value_eur,'Notional CFD EUR aprox.':cfd_notional_eur,
         'P/L %':pnl_pct,'Movimento subjacente %':movement_pct,'P/L EUR aprox.':pnl_eur,
         'Multiplicador contrato':multiplier if multiplier>0 else None,
         'Decisão principal':primary,'Curto prazo':short_action,'Score curto':short_score,
@@ -2142,6 +2240,218 @@ def _portfolio_quick_row(r):
         'Preço alvo pessoal':pa if pa>0 else None,'Origem':str(r.get('Origem') or ''),'Data':str(a['df'].index[-1].date()),
         '_analysis':a,
     }
+
+
+def valuation_scenarios(a):
+    """Estimativa transparente por cenários; não é previsão nem DCF completo."""
+    kind=a.get('kind')
+    underlying=a.get('underlying_kind')
+    if kind not in ['Ação','CFD'] or (kind=='CFD' and underlying!='Ação'):
+        return {'available':False,'reason':'Valor intrínseco aplicado apenas a ações/subjacentes de ações.'}
+    info=a.get('info') or {}
+    price=float(a['row']['Close'])
+    fair=_num(info,'investingFairValue')
+    anchors=[]
+    source_parts=[]
+    if fair is not None and fair>0:
+        base=float(fair)
+        source_parts.append('Fair Value InvestingPro')
+        confidence='Alta' if float(a.get('fund_complete') or 0)>=60 else 'Média'
+    else:
+        sector=_canonical_sector(info) or 'Other'
+        pe_base={
+            'Technology':25.0,'Financial Services':13.0,'Industrials':18.0,'Communication Services':20.0,
+            'Healthcare':22.0,'Consumer Cyclical':18.0,'Consumer Defensive':20.0,'Energy':12.0,
+            'Basic Materials':14.0,'Real Estate':18.0,'Utilities':16.0,
+        }.get(sector,18.0)
+        growth_vals=[]
+        for key in ['revenueGrowth','earningsGrowth']:
+            v=_num(info,key)
+            if v is not None:
+                growth_vals.append(v*100.0)
+        growth=float(np.median(growth_vals)) if growth_vals else 0.0
+        growth_adj=max(-0.15,min(0.30,growth/100.0*0.8))
+        target_pe=pe_base*(1.0+growth_adj)
+        for key,label in [('trailingPE','P/E'),('forwardPE','Forward P/E')]:
+            pe=_num(info,key)
+            if pe is not None and pe>0:
+                implied=price*target_pe/pe
+                if np.isfinite(implied) and implied>0:
+                    anchors.append(float(implied)); source_parts.append(label+' normalizado ao setor')
+        fcf=_num(info,'freeCashflow'); cap=_num(info,'marketCap')
+        if fcf is not None and cap and cap>0 and fcf>0:
+            fcf_yield=fcf/cap
+            target_yield={
+                'Technology':0.035,'Industrials':0.045,'Communication Services':0.04,'Healthcare':0.04,
+                'Consumer Cyclical':0.045,'Consumer Defensive':0.045,'Energy':0.07,'Basic Materials':0.06,
+                'Real Estate':0.055,'Utilities':0.055,'Financial Services':0.07,
+            }.get(sector,0.05)
+            implied=price*(fcf_yield/target_yield)
+            if np.isfinite(implied) and implied>0:
+                anchors.append(float(implied)); source_parts.append('FCF yield normalizado ao setor')
+        if not anchors:
+            return {'available':False,'reason':'Sem âncoras de avaliação suficientes para estimar cenários.'}
+        base=float(np.median(anchors))
+        base=max(price*0.45,min(price*2.0,base))
+        confidence='Média' if len(anchors)>=2 and float(a.get('fund_complete') or 0)>=55 else 'Baixa'
+    conservative=base*0.85
+    optimistic=base*1.15
+    upside=(base/price-1.0)*100.0 if price>0 else None
+    return {
+        'available':True,'conservative':conservative,'base':base,'optimistic':optimistic,
+        'upside_pct':upside,'confidence':confidence,'sources':' + '.join(dict.fromkeys(source_parts)),
+        'method':'Cenários heurísticos de avaliação; não é um DCF completo nem preço-alvo garantido.',
+    }
+
+
+def entry_zone(a, valuation=None):
+    row=a['row']; price=float(row['Close']); atrv=float(row['ATR14'])
+    ema20=float(row['EMA20']); ema50=float(row['EMA50']); ema200=float(row['EMA200'])
+    supports=[x for x in [ema20,ema50,ema200] if np.isfinite(x) and x<price]
+    anchor=max(supports) if supports else max(0.01,price-atrv)
+    low=max(0.01,anchor-0.75*atrv)
+    high=max(low,min(price,anchor+0.25*atrv))
+    deep=max(0.01,(ema200 if ema200<price else price-2.5*atrv))
+    status='AGUARDAR APROXIMAÇÃO À ZONA'
+    if low <= price <= high:
+        status='NA ZONA TÉCNICA — CONFIRMAR ENTRADA'
+    elif price < low:
+        status='ABAIXO DA ZONA — REVER TENDÊNCIA ANTES DE ENTRAR'
+    if price < ema200:
+        status='TENDÊNCIA LONGA FRACA — AGUARDAR ESTABILIZAÇÃO'
+    if valuation and valuation.get('available'):
+        base=_safe_float(valuation.get('base'))
+        if base and price > base*1.10:
+            status='AGUARDAR — PREÇO ACIMA DO CENÁRIO BASE'
+        elif base and price <= base*0.90 and float(a.get('tech_score') or 0)>=55 and price>=ema200:
+            status='AVALIAÇÃO ATRATIVA — CONFIRMAR TÉCNICA'
+    return {'low':low,'high':high,'deep':deep,'status':status,'anchor':anchor}
+
+
+def _portfolio_health_report(rows):
+    good=[r for r in rows if isinstance(r,dict) and r.get('_analysis')]
+    invest=[r for r in good if r.get('Tipo instrumento')!='CFD']
+    if not invest:
+        return {'score':None,'label':'Sem investimentos avaliáveis','risks':['Sem posições de investimento com dados suficientes.'],'sector_weights':{},'currency_weights':{},'asset_weights':{}}
+    vals=[]
+    for r in invest:
+        v=_safe_float(r.get('Valor atual EUR'))
+        if v is not None and v>0:
+            vals.append((r,v))
+    total=sum(v for _,v in vals)
+    asset_weights={}; sector_weights={}; currency_weights={}
+    if total>0:
+        for r,v in vals:
+            w=v/total*100.0
+            asset_weights[r['Ticker XTB']]=w
+            sec=str(r.get('Setor') or 'N/D')
+            cur=str(r.get('Moeda') or 'N/D')
+            sector_weights[sec]=sector_weights.get(sec,0.0)+w
+            currency_weights[cur]=currency_weights.get(cur,0.0)+w
+    quality=[_safe_float(r['_analysis'].get('fund_score')) for r in invest]
+    quality=[x for x in quality if x is not None]
+    tech=[_safe_float(r['_analysis'].get('tech_score')) for r in invest]
+    tech=[x for x in tech if x is not None]
+    comp=[_safe_float(r['_analysis'].get('fund_complete')) for r in invest]
+    comp=[x for x in comp if x is not None]
+    qscore=float(np.mean(quality)) if quality else 45.0
+    tscore=float(np.mean(tech)) if tech else 45.0
+    cscore=float(np.mean(comp)) if comp else 40.0
+    max_asset=max(asset_weights.values()) if asset_weights else 0.0
+    max_sector=max(sector_weights.values()) if sector_weights else 0.0
+    asset_div=100.0 if max_asset<=15 else (20.0 if max_asset>=40 else 100-(max_asset-15)*(80/25))
+    sector_div=100.0 if max_sector<=30 else (20.0 if max_sector>=65 else 100-(max_sector-30)*(80/35))
+    divscore=(asset_div+sector_div)/2.0
+    attention=sum(1 for r in invest if any(k in str(r.get('Decisão principal','')).upper() for k in ['REVER','REDUZIR','ALVO']))
+    decision_score=max(20.0,100.0-attention/max(len(invest),1)*100.0)
+    score=0.35*qscore+0.25*divscore+0.20*tscore+0.10*cscore+0.10*decision_score
+    score=max(0.0,min(100.0,score))
+    label='Forte' if score>=80 else ('Saudável' if score>=65 else ('Mista' if score>=50 else 'Atenção'))
+    risks=[]
+    if max_asset>20:
+        ticker=max(asset_weights,key=asset_weights.get); risks.append(f'Concentração: {ticker} representa cerca de {max_asset:.1f}% do valor de investimento.')
+    if max_sector>40:
+        sec=max(sector_weights,key=sector_weights.get); risks.append(f'Concentração setorial: {sec} representa cerca de {max_sector:.1f}%.')
+    if cscore<60:
+        risks.append(f'Cobertura média dos fundamentais/qualidade é {cscore:.0f}%.')
+    if attention:
+        risks.append(f'{attention} posição(ões) pedem revisão, redução ou atingiram um alvo.')
+    cfd_count=sum(1 for r in good if r.get('Tipo instrumento')=='CFD')
+    if cfd_count:
+        risks.append(f'{cfd_count} CFD(s) ficam fora da nota de saúde de investimento e devem ser avaliados como trading.')
+    if not risks:
+        risks.append('Sem alertas estruturais relevantes pelas regras atuais.')
+    return {'score':round(score,1),'label':label,'quality':round(qscore,1),'technical':round(tscore,1),'data':round(cscore,1),'diversification':round(divscore,1),'risks':risks,'sector_weights':sector_weights,'currency_weights':currency_weights,'asset_weights':asset_weights}
+
+
+def _active_alerts(rows):
+    by_ticker={str(r.get('Ticker XTB','')).upper():r for r in rows if isinstance(r,dict)}
+    active=[]
+    for t,r in by_ticker.items():
+        action=str(r.get('Decisão principal') or '')
+        if any(k in action.upper() for k in ['REVER','REDUZIR','ALVO']):
+            active.append({'Ticker':t,'Tipo':'Sistema','Mensagem':action})
+        elif 'CANDIDATO A REFORÇO' in action.upper():
+            active.append({'Ticker':t,'Tipo':'Sistema','Mensagem':'Candidato a reforço pelas regras atuais'})
+    for al in st.session_state.get('alerts',[]) or []:
+        t=str(al.get('ticker') or '').upper().strip(); r=by_ticker.get(t)
+        if not r: continue
+        cond=str(al.get('condition') or '')
+        threshold=_safe_float(al.get('threshold'))
+        price=_safe_float(r.get('Preço atual'))
+        triggered=False
+        if cond=='Preço <=' and threshold is not None and price is not None: triggered=price<=threshold
+        elif cond=='Preço >=' and threshold is not None and price is not None: triggered=price>=threshold
+        elif cond=='Rever / reduzir': triggered=any(k in str(r.get('Decisão principal','')).upper() for k in ['REVER','REDUZIR'])
+        elif cond=='Candidato a reforço': triggered='CANDIDATO A REFORÇO' in str(r.get('Decisão principal','')).upper()
+        if triggered:
+            msg=f'{cond} {threshold:g}' if threshold is not None and cond.startswith('Preço') else cond
+            active.append({'Ticker':t,'Tipo':'Pessoal','Mensagem':msg})
+    return active
+
+
+def decision_performance_standardized():
+    rows=[]
+    cache={}
+    for h in st.session_state.get('decision_history',[]) or []:
+        try:
+            ts=pd.to_datetime(h.get('Data decisão UTC'),utc=True,errors='coerce')
+            if pd.isna(ts):
+                continue
+            source=str(h.get('Ticker técnico') or '').upper().strip()
+            if not source:
+                source=resolve_instrument(h.get('Ticker XTB'))['source_ticker']
+            if source not in cache:
+                cache[source]=price_data(source,'5y','1d')
+            d=cache[source]
+            idx=pd.to_datetime(d.index)
+            if getattr(idx,'tz',None) is not None:
+                idx=idx.tz_localize(None)
+            decision_day=ts.tz_convert(None).normalize()
+            positions=np.where(idx.normalize()>=decision_day)[0]
+            if not len(positions):
+                continue
+            i=int(positions[0]); base=_safe_float(h.get('Preço na decisão'))
+            if base is None or base<=0:
+                base=float(d['Close'].iloc[i])
+            rec={'Data decisão':str(decision_day.date()),'Ticker XTB':h.get('Ticker XTB'),'Decisão':h.get('Decisão utilizador')}
+            for horizon in [5,20,60]:
+                j=i+horizon
+                rec[f'{horizon}d %']=((float(d['Close'].iloc[j])/base-1)*100 if j<len(d) else None)
+            r20=_safe_float(rec.get('20d %')); action=str(h.get('Decisão utilizador') or '').upper()
+            if r20 is not None:
+                if 'ACEIT' in action:
+                    rec['Resultado 20d']='Favorável' if r20>0 else ('Desfavorável' if r20<0 else 'Neutro')
+                elif 'REJEIT' in action:
+                    rec['Resultado 20d']='Favorável' if r20<0 else ('Desfavorável' if r20>0 else 'Neutro')
+                else:
+                    rec['Resultado 20d']='N/D'
+            else:
+                rec['Resultado 20d']='A aguardar dados'
+            rows.append(rec)
+        except Exception as e:
+            rows.append({'Ticker XTB':h.get('Ticker XTB'),'Decisão':h.get('Decisão utilizador'),'Erro':str(e)})
+    return pd.DataFrame(rows)
 
 
 # -----------------------------------------------------------------------------
@@ -2409,7 +2719,7 @@ def _comparison_metric_card(label, ticker, note=''):
         st.caption(note)
 
 st.caption('Modo simples: decisão prática primeiro, 3 evidências interpretadas e detalhe apenas quando pedes.')
-PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Analisar', 'Comparar'], horizontal=True, label_visibility='collapsed', key='main_page')
+PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Risco', 'Analisar', 'Comparar'], horizontal=True, label_visibility='collapsed', key='main_page')
 
 if PAGE == 'Hoje':
     st.subheader('Dashboard de oportunidades')
@@ -2423,6 +2733,8 @@ if PAGE == 'Hoje':
     only_type=st.selectbox('Tipo',['Todos','Ação','ETF','ETN'],index=0,key='v14_type')
 
     if st.button('Atualizar oportunidades',type='primary',use_container_width=True,key='v14_scan'):
+        if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
+            load_persistent_state()
         if not scan_markets:
             st.error('Escolhe pelo menos um mercado.')
         else:
@@ -2559,12 +2871,22 @@ elif PAGE == 'Carteira':
 ```toml
 SUPABASE_URL = "https://SEU-PROJETO.supabase.co"
 SUPABASE_SECRET_KEY = "sb_secret_..."
-PORTFOLIO_OWNER_ID = "carteira-principal"
-APP_PASSWORD = "uma-palavra-passe-forte"
-```
-4. Guarda os Secrets e reinicia a app. A carteira passa a carregar e gravar automaticamente.
 
-**Não coloques a chave secreta nem a palavra-passe no GitHub.** Devem existir apenas nos Secrets do Streamlit.
+[USERS.vitor]
+password = "uma-palavra-passe-forte"
+owner_id = "carteira-principal" # usa o owner_id atual para manter a carteira existente
+display_name = "Vítor"
+
+[USERS.utilizador2]
+password = "outra-palavra-passe"
+owner_id = "utilizador2"
+display_name = "Utilizador 2"
+```
+4. Guarda os Secrets e reinicia a app. Cada login passa a usar o seu `owner_id` e os dados ficam separados.
+
+A configuração antiga com `APP_PASSWORD` + `PORTFOLIO_OWNER_ID` continua compatível para uma única conta.
+
+**Não coloques chaves nem palavras-passe no GitHub.** Devem existir apenas nos Secrets do Streamlit.
 ''')
 
     cstore1,cstore2=st.columns(2)
@@ -2664,6 +2986,21 @@ APP_PASSWORD = "uma-palavra-passe-forte"
                 k2.metric('Atenção',attention)
                 k3.metric('P/L aprox.',f'€{pnl_total:,.0f}')
 
+                health=_portfolio_health_report(good)
+                st.markdown('### Radar da carteira')
+                h1,h2,h3,h4=st.columns(4)
+                h1.metric('Saúde',f"{health['score']:.0f}/100" if health.get('score') is not None else 'N/D',health.get('label',''))
+                h2.metric('Qualidade',f"{health.get('quality',0):.0f}/100" if health.get('score') is not None else 'N/D')
+                h3.metric('Diversificação',f"{health.get('diversification',0):.0f}/100" if health.get('score') is not None else 'N/D')
+                h4.metric('Cobertura dados',f"{health.get('data',0):.0f}%" if health.get('score') is not None else 'N/D')
+                for risk in health.get('risks',[])[:3]:
+                    st.caption('• '+risk)
+
+                active=_active_alerts(good)
+                if active:
+                    with st.expander(f'🔔 Alertas ativos ({len(active)})'):
+                        st.dataframe(pd.DataFrame(active),hide_index=True,use_container_width=True)
+
                 st.markdown('### Resumo das posições')
                 cfd_sem_mult=0
                 for r in good:
@@ -2688,8 +3025,13 @@ APP_PASSWORD = "uma-palavra-passe-forte"
                 st.divider()
                 sel=st.selectbox('Detalhe de uma posição',[r['Ticker XTB'] for r in good],key='v14_port_pick')
                 if st.button('Ver alvos e prazos',key='v14_port_detail',use_container_width=True):
+                    selected_row=next((x for x in good if x.get('Ticker XTB')==sel),None)
                     with st.spinner('A calcular histórico apenas desta posição...'):
-                        a=analyze_asset(sel,detailed=True)
+                        a=analyze_asset(
+                            sel,detailed=True,
+                            instrument_type=(selected_row or {}).get('Tipo instrumento') or 'Auto',
+                            source_override=((selected_row or {}).get('Ticker técnico') or None),
+                        )
                     st.session_state['v14_port_detail_result']=a
                 detail=st.session_state.get('v14_port_detail_result')
                 if detail is not None and detail.get('xtb_ticker')==sel:
@@ -2699,6 +3041,10 @@ APP_PASSWORD = "uma-palavra-passe-forte"
                     d2.metric('Alvo técnico',f'{detail["target"]:.2f} {detail["currency"]}')
                     tt=detail.get('target_time',{})
                     d3.metric('Tempo histórico',f'{tt.get("median_days"):.0f} dias' if tt.get('median_days') is not None else 'N/D')
+                    val=valuation_scenarios(detail); zone=entry_zone(detail,val)
+                    st.caption(f"Zona técnica potencial: {zone['low']:.2f}–{zone['high']:.2f} {detail['currency']} · {zone['status']}")
+                    if val.get('available'):
+                        st.caption(f"Cenário de valor base: {val['base']:.2f} {detail['currency']} · confiança {val['confidence']} · {val['sources']}.")
                     if tt.get('hit_rate') is not None:
                         st.caption(f"{tt['hit_rate']:.1f}% das amostras semelhantes tocaram um movimento equivalente em até 60 dias de mercado. Histórico, não previsão.")
             else:
@@ -2720,6 +3066,116 @@ APP_PASSWORD = "uma-palavra-passe-forte"
             if isinstance(h2,pd.DataFrame) and not h2.empty:
                 cols2=['Ticker XTB','Decisão utilizador','Preço na decisão','Preço atual','Variação desde decisão %','Percurso desde decisão','Regra atual']
                 st.dataframe(h2[[c for c in cols2 if c in h2.columns]],hide_index=True,use_container_width=True)
+
+            if st.button('Avaliar método a 5 / 20 / 60 dias de mercado',key='decision_stats_run',use_container_width=True):
+                with st.spinner('A medir as decisões com horizontes comparáveis...'):
+                    st.session_state['decision_stats_df']=decision_performance_standardized()
+            ds=st.session_state.get('decision_stats_df')
+            if isinstance(ds,pd.DataFrame) and not ds.empty:
+                valid=ds[ds['Resultado 20d'].isin(['Favorável','Desfavorável','Neutro'])] if 'Resultado 20d' in ds.columns else pd.DataFrame()
+                if not valid.empty:
+                    fav=(valid['Resultado 20d']=='Favorável').mean()*100
+                    d1,d2=st.columns(2)
+                    d1.metric('Decisões favoráveis a 20 dias',f'{fav:.0f}%')
+                    d2.metric('Amostras comparáveis',len(valid))
+                cols3=['Data decisão','Ticker XTB','Decisão','5d %','20d %','60d %','Resultado 20d']
+                st.dataframe(ds[[c for c in cols3 if c in ds.columns]],hide_index=True,use_container_width=True)
+                st.caption('“Favorável” significa que uma decisão aceite subiu ou uma decisão rejeitada caiu ao fim de 20 dias de mercado. É uma métrica de aprendizagem, não prova causal.')
+
+
+elif PAGE == 'Risco':
+    st.subheader('Risco e alertas')
+    st.caption('Saúde, concentração e alertas da carteira. CFDs são tratados separadamente dos investimentos.')
+    if not st.session_state.get('_persistent_loaded'):
+        with st.spinner('A carregar a carteira guardada...'):
+            load_persistent_state()
+
+    if st.session_state.get('portfolio_input'):
+        if st.button('Atualizar radar de risco',type='primary',use_container_width=True,key='risk_refresh'):
+            out=[]
+            prog=st.progress(0,text='A atualizar risco da carteira...')
+            for i,r in enumerate(st.session_state.portfolio_input,1):
+                try:
+                    qr=_portfolio_quick_row(r)
+                    if qr: out.append(qr)
+                except Exception as e:
+                    out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
+                prog.progress(i/max(len(st.session_state.portfolio_input),1),text=f'{i}/{len(st.session_state.portfolio_input)}')
+            prog.empty()
+            st.session_state['v14_portfolio_rows']=out
+            st.session_state['portfolio_rows']=[{k:v for k,v in x.items() if k!='_analysis'} for x in out]
+
+        rows=st.session_state.get('v14_portfolio_rows',[])
+        good=[r for r in rows if isinstance(r,dict) and r.get('_analysis')]
+        if good:
+            health=_portfolio_health_report(good)
+            r1,r2,r3,r4=st.columns(4)
+            r1.metric('Saúde da carteira',f"{health['score']:.0f}/100" if health.get('score') is not None else 'N/D',health.get('label',''))
+            r2.metric('Qualidade',f"{health.get('quality',0):.0f}/100" if health.get('score') is not None else 'N/D')
+            r3.metric('Diversificação',f"{health.get('diversification',0):.0f}/100" if health.get('score') is not None else 'N/D')
+            r4.metric('Técnica média',f"{health.get('technical',0):.0f}/100" if health.get('score') is not None else 'N/D')
+
+            st.markdown('### Principais riscos')
+            for risk in health.get('risks',[]): st.write('• '+risk)
+
+            e1,e2=st.columns(2)
+            with e1:
+                st.markdown('#### Exposição por setor')
+                sec=pd.DataFrame([{'Setor':k,'Peso %':v} for k,v in sorted(health.get('sector_weights',{}).items(),key=lambda x:x[1],reverse=True)])
+                if not sec.empty: st.dataframe(sec,hide_index=True,use_container_width=True)
+                else: st.caption('Sem valores suficientes.')
+            with e2:
+                st.markdown('#### Exposição por moeda')
+                cur=pd.DataFrame([{'Moeda':k,'Peso %':v} for k,v in sorted(health.get('currency_weights',{}).items(),key=lambda x:x[1],reverse=True)])
+                if not cur.empty: st.dataframe(cur,hide_index=True,use_container_width=True)
+                else: st.caption('Sem valores suficientes.')
+
+            cfds=[r for r in good if r.get('Tipo instrumento')=='CFD']
+            if cfds:
+                st.markdown('### Trading / CFDs')
+                cdf=pd.DataFrame([{
+                    'Ticker':r.get('Ticker XTB'),'Subjacente':r.get('Ticker técnico'),'Movimento %':r.get('Movimento subjacente %'),
+                    'Notional EUR aprox.':r.get('Notional CFD EUR aprox.'),'Decisão':r.get('Decisão principal')
+                } for r in cfds])
+                st.dataframe(cdf,hide_index=True,use_container_width=True)
+                st.caption('O notional só aparece quando existe multiplicador de contrato. Não é tratado como valor de investimento da carteira.')
+
+            st.markdown('### Alertas')
+            active=_active_alerts(good)
+            if active:
+                st.dataframe(pd.DataFrame(active),hide_index=True,use_container_width=True)
+            else:
+                st.success('Nenhum alerta ativo nas regras avaliadas agora.')
+            st.caption('Os alertas desta página são avaliados quando atualizas a carteira/radar; não enviam notificações push em segundo plano.')
+
+            with st.expander('➕ Criar alerta pessoal'):
+                at=st.selectbox('Ticker',[r['Ticker XTB'] for r in good],key='alert_ticker')
+                ac=st.selectbox('Condição',['Preço <=','Preço >=','Rever / reduzir','Candidato a reforço'],key='alert_condition')
+                ath=None
+                if ac.startswith('Preço'):
+                    current=next((_safe_float(r.get('Preço atual')) for r in good if r.get('Ticker XTB')==at),None) or 0.0
+                    ath=st.number_input('Nível de preço',min_value=0.0,value=float(current),step=0.01,key='alert_threshold')
+                if st.button('Guardar alerta',use_container_width=True,key='alert_save'):
+                    alerts=list(st.session_state.get('alerts',[]) or [])
+                    alerts.append({'ticker':at,'condition':ac,'threshold':ath,'created_at':_now_utc_iso()})
+                    st.session_state.alerts=alerts
+                    save_persistent_state(show_error=True)
+                    st.success('Alerta guardado para este utilizador.')
+                    st.rerun()
+            alerts=list(st.session_state.get('alerts',[]) or [])
+            if alerts:
+                with st.expander('Gerir alertas guardados'):
+                    adf=pd.DataFrame(alerts)
+                    st.dataframe(adf,hide_index=True,use_container_width=True)
+                    choices=[f"{i+1} · {a.get('ticker')} · {a.get('condition')}" for i,a in enumerate(alerts)]
+                    rem=st.selectbox('Remover alerta',choices,key='alert_remove_pick')
+                    if st.button('Remover selecionado',use_container_width=True,key='alert_remove'):
+                        idx=choices.index(rem); alerts.pop(idx); st.session_state.alerts=alerts
+                        save_persistent_state(show_error=True); st.rerun()
+        else:
+            st.info('Carrega em **Atualizar radar de risco** para calcular a saúde e as exposições atuais.')
+    else:
+        st.info('Ainda não tens posições registadas nesta conta.')
 
 
 elif PAGE == 'Comparar':
@@ -2904,6 +3360,8 @@ elif PAGE == 'Analisar':
         instrument_hint=st.selectbox('Tipo',INSTRUMENT_TYPES,index=0,key='v24_an_type')
     source_hint=st.text_input('Ticker técnico/subjacente (opcional)',value='',key='v24_an_source',placeholder='Ex.: ^NDX, GC=F ou NVDA')
     if st.button('Analisar agora',type='primary',use_container_width=True,key='v14_an_run'):
+        if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
+            load_persistent_state()
         try:
             with st.spinner('A analisar o essencial...'):
                 a=analyze_asset(ticker,None if market_hint=='Auto' else market_hint,detailed=False,instrument_type=instrument_hint,source_override=(source_hint.upper().strip() or None))
@@ -2929,6 +3387,22 @@ elif PAGE == 'Analisar':
         p1,p2=st.columns(2)
         p1.metric('Preço atual',f"{float(a['row']['Close']):.2f} {a['currency']}")
         p2.metric('Tipo',a['kind'])
+
+        val=valuation_scenarios(a)
+        zone=entry_zone(a,val)
+        st.markdown('### Entrada e avaliação')
+        z1,z2=st.columns(2)
+        z1.metric('Zona técnica potencial',f"{zone['low']:.2f}–{zone['high']:.2f} {a['currency']}")
+        z2.metric('Leitura',zone['status'])
+        st.caption(f"Referência de suporte mais profunda: {zone['deep']:.2f} {a['currency']}. Zona baseada em EMA/ATR; não é uma ordem de compra.")
+        if val.get('available'):
+            v1,v2,v3=st.columns(3)
+            v1.metric('Conservador',f"{val['conservative']:.2f} {a['currency']}")
+            v2.metric('Base',f"{val['base']:.2f} {a['currency']}",f"{val.get('upside_pct',0):+.1f}% vs preço")
+            v3.metric('Otimista',f"{val['optimistic']:.2f} {a['currency']}")
+            st.caption(f"Confiança {val['confidence']} · {val['sources']} · {val['method']}")
+        elif a.get('kind') in ['Ação','CFD']:
+            st.caption(val.get('reason','Sem cenário de avaliação disponível.'))
 
         if st.button('Ver alvos, prazo e histórico',use_container_width=True,key='v14_an_detail'):
             try:
