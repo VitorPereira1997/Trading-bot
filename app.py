@@ -2352,7 +2352,7 @@ def _extract_pdf_pages(uploaded_file):
     try:
         from pypdf import PdfReader
     except Exception as e:
-        raise RuntimeError('Falta a dependência pypdf. Atualiza o requirements.txt da v27.') from e
+        raise RuntimeError('Falta a dependência pypdf. Atualiza o requirements.txt da v28.') from e
     raw=uploaded_file.getvalue() if hasattr(uploaded_file,'getvalue') else bytes(uploaded_file)
     reader=PdfReader(io.BytesIO(raw))
     pages=[]
@@ -2392,6 +2392,145 @@ def _money_abs(value):
     n=float(m.group(1)); unit=m.group(2)
     mult={'':1.0,'K':1e3,'M':1e6,'B':1e9,'T':1e12}.get(unit,1.0)
     return n*mult
+
+
+def _report_pt_text(text, kind='neutral'):
+    """Converte frases típicas de relatórios financeiros em inglês para PT-PT.
+
+    É deliberadamente local/determinístico: preserva números, tickers e siglas e
+    não envia conteúdo do relatório para serviços externos. Quando a frase não
+    encaixa num padrão conhecido, aplica um glossário financeiro conservador.
+    """
+    s=re.sub(r'\s+',' ',str(text or '')).strip()
+    if not s:
+        return s
+
+    # Padrões completos mais frequentes nos relatórios ProResearch.
+    patterns=[
+        (r'^Intensifying competition from (.+?), combined with (.+?), could pressure (.+?)\.$',
+         r'A intensificação da concorrência de \1, em conjunto com \2, poderá pressionar \3.'),
+        (r'^(.+?), which derived (.+?) of its (.+?) revenue from (.+?), faces rising default risk \((.+?)\), representing (.+?)\.$',
+         r'\1, que obteve \2 das suas receitas de \3 através de \4, enfrenta um risco crescente de incumprimento (\5), representando \6.'),
+        (r'^Forward P/E compresses from ([0-9.,]+x) in (FY\d+) to ([0-9.,]+x) in (FY\d+), reflecting expected EPS growth of (.+?) annually through (FY\d+)\.$',
+         r'O Forward P/E deverá descer de \1 em \2 para \3 em \4, refletindo um crescimento esperado do EPS de \5 por ano até \6.'),
+        (r'^Capital expenditures reached (.+?), with (FY\d+) capex expected to exceed (.+?), compressing free cash flow and gross margins\.$',
+         r'As despesas de capital (CapEx) atingiram \1, sendo esperado que o CapEx em \2 ultrapasse \3, o que poderá pressionar o Free Cash Flow e as margens brutas.'),
+        (r'^(.+?) revenue declined ([0-9.,]+%) to (.+?), with (.+?) revenue down ([0-9.,]+%) and (.+?) down ([0-9.,]+%); (.+?) guidance implies (.+?) will decline (.+?)\.$',
+         r'As receitas de \1 diminuíram \2 para \3, com as receitas de \4 a cair \5 e \6 a cair \7; o guidance de \8 indica que \9 deverá diminuir \10.'),
+    ]
+    for pat,repl in patterns:
+        if re.search(pat,s,flags=re.I):
+            s=re.sub(pat,repl,s,flags=re.I)
+            break
+
+    # Tradução conservadora de expressões financeiras comuns. Mantém nomes próprios.
+    replacements=[
+        (r'cloud infrastructure leader','líder em infraestrutura cloud'),
+        (r'strong AI/model capabilities','fortes capacidades de IA/modelos'),
+        (r'deep investments in','fortes investimentos em'),
+        (r'CDS implying','CDS a indicar'),
+        (r'5-year default probability','probabilidade de incumprimento a 5 anos'),
+        (r'a potential concentration and counterparty risk','um potencial risco de concentração e de contraparte'),
+        (r"in Microsoft's AI infrastructure ecosystem",'no ecossistema de infraestrutura de IA da Microsoft'),
+        (r"Azure's market share",'a quota de mercado da Azure'),
+        (r"Azure's pricing power",'o poder de fixação de preços da Azure'),
+        (r'Q4 alone','apenas no Q4'),
+        (r'in the high teens','na faixa alta dos dois dígitos'),
+        (r'\bbillion\b','mil milhões'),
+        (r'\bmillion\b','milhões'),
+        (r'\btrillion\b','biliões'),
+        (r'\brevenue\b','receitas'),
+        (r'\band\b','e'),
+        (r'\bBullish Highlights\b','Destaques positivos'),
+        (r'\bBearish Highlights\b','Destaques negativos'),
+        (r'\bBull Case\b','Cenário positivo'),
+        (r'\bBear Case\b','Cenário negativo'),
+        (r'\bstrong demand\b','procura forte'),
+        (r'\bstrong growth\b','crescimento forte'),
+        (r'\brevenue growth\b','crescimento das receitas'),
+        (r'\bearnings growth\b','crescimento dos lucros'),
+        (r'\bnet income growth\b','crescimento do lucro líquido'),
+        (r'\bgross margin\b','margem bruta'),
+        (r'\boperating margin\b','margem operacional'),
+        (r'\bfree cash flow\b','Free Cash Flow'),
+        (r'\bcash flow\b','cash flow'),
+        (r'\bcapital expenditures\b','despesas de capital (CapEx)'),
+        (r'\bcapex\b','CapEx'),
+        (r'\bcustomer concentration\b','concentração de clientes'),
+        (r'\bcounterparty risk\b','risco de contraparte'),
+        (r'\bdefault risk\b','risco de incumprimento'),
+        (r'\bsupply chain tightness\b','restrições na cadeia de abastecimento'),
+        (r'\bsupply chain\b','cadeia de abastecimento'),
+        (r'\bpricing power\b','poder de fixação de preços'),
+        (r'\bmarket share\b','quota de mercado'),
+        (r'\bcompetitive moat\b','vantagem competitiva'),
+        (r'\bcompetition\b','concorrência'),
+        (r'\bovervalued\b','sobreavaliada'),
+        (r'\bundervalued\b','subavaliada'),
+        (r'\bdebt\b','dívida'),
+        (r'\bcash and marketable securities\b','caixa e títulos negociáveis'),
+        (r'\bno funded debt\b','sem dívida financiada'),
+        (r'\bprice target\b','preço-alvo'),
+        (r'\banalyst target\b','alvo dos analistas'),
+        (r'\banalysts\b','analistas'),
+        (r'\bguidance\b','guidance'),
+        (r'\braised\b','aumentou'),
+        (r'\bdeclined\b','diminuiu'),
+        (r'\bdecline\b','queda'),
+        (r'\bdown\b','em queda'),
+        (r'\bup\b','em alta'),
+        (r'\bexpected to\b','espera-se que'),
+        (r'\bcould pressure\b','poderá pressionar'),
+        (r'\bpressure\b','pressão'),
+        (r'\bcompressing\b','pressionando'),
+        (r'\breflecting\b','refletindo'),
+        (r'\brepresenting\b','representando'),
+        (r'\bdriven by\b','impulsionado por'),
+        (r'\bdue to\b','devido a'),
+        (r'\bthrough\b','até'),
+        (r'\bannually\b','por ano'),
+    ]
+    out=s
+    for pat,repl in replacements:
+        out=re.sub(pat,repl,out,flags=re.I)
+
+    # Se ainda parecer maioritariamente inglês, mostra um resumo PT seguro em vez
+    # de fingir uma tradução perfeita; o original continua acessível na interface.
+    # Pequenos acertos gramaticais depois das substituições.
+    out=re.sub(r"em conjunto com ([A-Z][A-Za-z0-9.&-]+) e ([A-Z][A-Za-z0-9.&-]+)'s fortes investimentos em",lambda m:f"em conjunto com os fortes investimentos da {m.group(1)} e da {m.group(2)} em",out)
+    out=out.replace('a quota de mercado da Azure e poder de fixação de preços','a quota de mercado e o poder de fixação de preços da Azure')
+    out=re.sub(r'\bin apenas no\b','apenas no',out,flags=re.I)
+    out=re.sub(r'CDS a indicar (.+?) probabilidade de incumprimento',r'CDS a indicar uma probabilidade de incumprimento de \1',out,flags=re.I)
+    out=re.sub(r'receitas de (\d{4}) através de ([A-Z][A-Za-z0-9.& -]+)',r'receitas de \1 provenientes de \2',out)
+    out=out.replace('provenientes de Microsoft','provenientes da Microsoft')
+    out=re.sub(r'\bFree cash flow\b','Free Cash Flow',out,flags=re.I)
+    out=re.sub(r'(?<=\d)\.(?=\d)',',',out)
+    low=out.lower()
+    english_hits=sum(low.count(w) for w in [' the ',' and ',' with ',' from ',' which ',' of ',' to ',' in ',' is ',' are ',' has ',' have ',' could ',' expected '])
+    if english_hits>=4:
+        src=s.lower()
+        nums=', '.join(re.findall(r'(?<![A-Za-z])(?:\$|€)?\s*~?[0-9]+(?:[.,][0-9]+)?(?:%|x|\s*(?:million|billion|trillion|M|B|T))?',s,flags=re.I)[:5])
+        detail=f' Valores mencionados: {nums}.' if nums else ''
+        if any(k in src for k in ['competition','market share','pricing power']):
+            return 'O relatório destaca concorrência crescente, com possível pressão sobre quota de mercado, preços e/ou margens.'+detail
+        if any(k in src for k in ['default risk','counterparty','concentration']):
+            return 'O relatório identifica risco de concentração e/ou de contraparte, que pode aumentar a exposição a clientes ou parceiros específicos.'+detail
+        if any(k in src for k in ['capex','capital expenditures','free cash flow']):
+            return 'O relatório aponta investimento de capital elevado, que poderá pressionar o Free Cash Flow e as margens no curto/médio prazo.'+detail
+        if any(k in src for k in ['declined','down','slowdown','headwind']):
+            return 'O relatório assinala deterioração em algumas métricas operacionais, que merece acompanhamento.'+detail
+        if kind=='positive':
+            return 'O relatório identifica um fator positivo relevante para crescimento, procura, rentabilidade ou execução.'+detail
+        if kind=='risk':
+            return 'O relatório identifica um risco relevante que pode afetar crescimento, margens, procura ou execução.'+detail
+    return out
+
+
+def _pdf_technical_pt(value):
+    return {
+        'Strong Sell':'Venda forte','Sell':'Venda','Neutral':'Neutro',
+        'Buy':'Compra','Strong Buy':'Compra forte'
+    }.get(str(value or '').strip(), value or 'N/D')
 
 
 def _report_sentence_candidates(text, positive=True, limit=4):
@@ -3809,19 +3948,24 @@ elif PAGE == 'Relatório':
             t1.metric('RSI',_fmt_num(float(a['row']['RSI14']),1))
             t2.metric('Retorno 20d',_fmt_num(float(a['row']['RET20']),1,'%'))
             t3.metric('Retorno 60d',_fmt_num(float(a['row']['RET60']),1,'%'))
-            t4.metric('PDF na data',report.get('pdf_technical') or 'N/D')
+            t4.metric('PDF na data',_pdf_technical_pt(report.get('pdf_technical')))
             st.caption('A técnica do PDF é apenas referência histórica. A decisão usa a técnica recalculada com preços atuais.')
 
         with tr:
+            st.caption('Leitura automática em português. Números, percentagens e siglas financeiras são preservados; o texto original fica disponível para conferência.')
             st.markdown('#### Pontos positivos do relatório')
             positives=report.get('positive_points') or []
             if positives:
-                for x in positives: st.write('• '+x)
+                for x in positives: st.write('• '+_report_pt_text(x,'positive'))
+                with st.expander('Ver texto original · pontos positivos'):
+                    for x in positives: st.write('• '+x)
             else: st.write('Sem pontos positivos estruturados suficientes no texto extraído.')
             st.markdown('#### Riscos / pontos de atenção')
             risks=report.get('risk_points') or []
             if risks:
-                for x in risks: st.write('• '+x)
+                for x in risks: st.write('• '+_report_pt_text(x,'risk'))
+                with st.expander('Ver texto original · riscos'):
+                    for x in risks: st.write('• '+x)
             else: st.write('Sem riscos estruturados suficientes no texto extraído.')
 
         with td:
