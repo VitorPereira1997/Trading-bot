@@ -6,6 +6,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import hmac
+import hashlib
 import re
 import unicodedata
 from pathlib import Path
@@ -50,7 +51,7 @@ def _clear_user_session(clear_auth=False):
         'alerts','portfolio_rows','persistence_status','persistence_last_save','persistence_error',
         '_persistent_loaded','v14_portfolio_rows','v14_hist_revalued','v14_port_detail_result',
         'comparison_df','comparison_time','v14_scan_rows','v20_scan_time','v14_analysis','v14_analysis_detail',
-        'report_parsed','report_result','report_file_name',
+        'report_parsed','report_result','report_file_name','report_library','_report_last_upload_hash',
     }
     prefixes=('alert_','risk_','decision_stats_')
     for key in list(st.session_state.keys()):
@@ -248,6 +249,8 @@ if 'investingpro_import_meta' not in st.session_state:
     st.session_state.investingpro_import_meta = {}
 if 'alerts' not in st.session_state:
     st.session_state.alerts = []
+if 'report_library' not in st.session_state:
+    st.session_state.report_library = {}
 
 # -----------------------------------------------------------------------------
 # Persistência permanente (Supabase)
@@ -332,6 +335,7 @@ def persistent_state_payload():
         'alerts':_json_safe(st.session_state.get('alerts',[])),
         'investingpro_data':_json_safe(st.session_state.get('investingpro_data',{})),
         'investingpro_import_meta':_json_safe(st.session_state.get('investingpro_import_meta',{})),
+        'report_library':_json_safe(st.session_state.get('report_library',{})),
     }
 
 def save_persistent_state(show_error=False):
@@ -381,6 +385,7 @@ def load_persistent_state(force=False):
             st.session_state.alerts=list(state.get('alerts') or [])
             st.session_state.investingpro_data=dict(state.get('investingpro_data') or {})
             st.session_state.investingpro_import_meta=dict(state.get('investingpro_import_meta') or {})
+            st.session_state.report_library=dict(state.get('report_library') or {})
             st.session_state['persistence_last_save']=rows[0].get('updated_at')
         else:
             # Um owner_id novo começa sempre vazio; nunca reutiliza dados de outro login.
@@ -390,6 +395,7 @@ def load_persistent_state(force=False):
             st.session_state.alerts=[]
             st.session_state.investingpro_data={}
             st.session_state.investingpro_import_meta={}
+            st.session_state.report_library={}
         st.session_state['persistence_status']='Ligado'
         st.session_state.pop('persistence_error',None)
     except Exception as e:
@@ -2346,7 +2352,7 @@ def _extract_pdf_pages(uploaded_file):
     try:
         from pypdf import PdfReader
     except Exception as e:
-        raise RuntimeError('Falta a dependência pypdf. Atualiza o requirements.txt da v26.') from e
+        raise RuntimeError('Falta a dependência pypdf. Atualiza o requirements.txt da v27.') from e
     raw=uploaded_file.getvalue() if hasattr(uploaded_file,'getvalue') else bytes(uploaded_file)
     reader=PdfReader(io.BytesIO(raw))
     pages=[]
@@ -2437,13 +2443,12 @@ def parse_investingpro_report(pages, full_text):
     analyst_avg=_rx_value(first,r'Analyst Avg\.\s*\(([0-9.,]+)\)')
     analyst_low=_rx_value(first,r'Analyst Low\s*\(([0-9.,]+)\)')
     analyst_high=_rx_value(first,r'Analyst High\s*\(([0-9.,]+)\)')
-    # Alguns campos aparecem na página 1 numa ordem visual diferente da ordem textual.
-    # O painel visual apresenta três ratings sequenciais: Growth, Profitability e Cash Flow.
-    vals=[float(x) for x in re.findall(r'([0-9]+(?:\.[0-9]+)?)/10',first)]
-    growth_rating=vals[0] if len(vals)>0 else None
-    profitability_rating=vals[1] if len(vals)>1 else None
-    cashflow_rating=vals[2] if len(vals)>2 else None
-    financial_health=None
+    # Lê cada rating pelo respetivo rótulo. Não assume que a ordem visual do PDF
+    # coincide com a ordem devolvida pelo extrator de texto.
+    financial_health=_rx_value(first,r'Financial Health.*?([0-9]+(?:\.[0-9]+)?)/10',re.I|re.S)
+    growth_rating=_rx_value(first,r'Growth Rating.*?([0-9]+(?:\.[0-9]+)?)/10',re.I|re.S)
+    profitability_rating=_rx_value(first,r'Profitability Rating.*?([0-9]+(?:\.[0-9]+)?)/10',re.I|re.S)
+    cashflow_rating=_rx_value(first,r'Cash Flow Rating.*?([0-9]+(?:\.[0-9]+)?)/10',re.I|re.S)
 
 
     analyst_count=None
@@ -2697,11 +2702,62 @@ def _report_summary_reasons(a, report, decision):
     return reasons[:3]
 
 
-def build_report_analysis(uploaded_file):
-    pages,text=_extract_pdf_pages(uploaded_file)
-    report=parse_investingpro_report(pages,text)
+def _report_date_obj(value):
+    if not value:
+        return None
+    txt=str(value).strip()
+    for fmt in ('%b %d, %Y','%Y-%m-%d','%d/%m/%Y'):
+        try:
+            return datetime.strptime(txt,fmt)
+        except Exception:
+            pass
+    return None
+
+
+def _report_archive_entry(report, file_name='', file_hash=''):
+    return {
+        'report':_json_safe(report),
+        'file_name':str(file_name or ''),
+        'file_hash':str(file_hash or ''),
+        'saved_at':datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _choose_latest_report(xtb, uploaded_report, file_name='', file_hash=''):
+    """Escolhe o relatório mais recente já conhecido para o ticker.
+
+    O PDF nunca é guardado no estado JSON; apenas os dados extraídos.
+    Um relatório com data anterior não substitui um mais recente.
+    """
+    library=st.session_state.setdefault('report_library',{})
+    current=library.get(xtb) if isinstance(library,dict) else None
+    current_report=(current or {}).get('report') or {}
+    cur_dt=_report_date_obj(current_report.get('report_date'))
+    new_dt=_report_date_obj(uploaded_report.get('report_date'))
+
+    if current_report:
+        if cur_dt and new_dt and new_dt < cur_dt:
+            return current_report,'older',current
+        if cur_dt and not new_dt:
+            return current_report,'undated_older',current
+        if cur_dt and new_dt and new_dt == cur_dt and str((current or {}).get('file_hash') or '') == str(file_hash or ''):
+            return current_report,'same',current
+
+    entry=_report_archive_entry(uploaded_report,file_name,file_hash)
+    library[xtb]=entry
+    st.session_state.report_library=library
+    if current_report and cur_dt and new_dt and new_dt == cur_dt:
+        status='replaced_same_date'
+    elif current_report:
+        status='newer'
+    else:
+        status='first'
+    return uploaded_report,status,entry
+
+
+def build_report_analysis_from_report(report):
     if not report.get('ticker'):
-        raise ValueError('Não consegui identificar o ticker no PDF. O formato esperado é semelhante a InvestingPro Research.')
+        raise ValueError('Não consegui identificar o ticker no relatório guardado.')
     xtb=_report_xtb_ticker(report)
     if not xtb:
         raise ValueError('Ticker identificado, mas não foi possível mapear o instrumento para análise de mercado.')
@@ -2711,7 +2767,23 @@ def build_report_analysis(uploaded_file):
     decision=_report_decision(a,report,holding)
     valuation=valuation_scenarios(a)
     zone=entry_zone(a,valuation)
-    return {'report':report,'analysis':a,'decision':decision,'holding':holding,'valuation':valuation,'zone':zone,'pages':pages}
+    return {'report':report,'analysis':a,'decision':decision,'holding':holding,'valuation':valuation,'zone':zone}
+
+
+def build_report_analysis(uploaded_file):
+    raw=uploaded_file.getvalue() if hasattr(uploaded_file,'getvalue') else bytes(uploaded_file)
+    file_hash=hashlib.sha256(raw).hexdigest()
+    pages,text=_extract_pdf_pages(uploaded_file)
+    uploaded_report=parse_investingpro_report(pages,text)
+    if not uploaded_report.get('ticker'):
+        raise ValueError('Não consegui identificar o ticker no PDF. O formato esperado é semelhante a InvestingPro Research.')
+    xtb=_report_xtb_ticker(uploaded_report)
+    if not xtb:
+        raise ValueError('Ticker identificado, mas não foi possível mapear o instrumento para análise de mercado.')
+    chosen,status,entry=_choose_latest_report(xtb,uploaded_report,getattr(uploaded_file,'name',''),file_hash)
+    result=build_report_analysis_from_report(chosen)
+    result.update({'pages':pages,'upload_status':status,'uploaded_report':uploaded_report,'archive_entry':entry,'file_hash':file_hash})
+    return result
 
 
 def _portfolio_health_report(rows):
@@ -3570,31 +3642,82 @@ elif PAGE == 'Relatório':
     if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
         load_persistent_state()
 
-    report_file=st.file_uploader('Relatório PDF',type=['pdf'],key='report_pdf_upload')
-    c1,c2=st.columns([2,1])
-    with c1:
-        run_report=st.button('Analisar relatório',type='primary',use_container_width=True,key='report_run',disabled=(report_file is None))
-    with c2:
-        if st.button('Limpar',use_container_width=True,key='report_clear'):
-            for k in ['report_parsed','report_result','report_file_name']:
-                st.session_state.pop(k,None)
-            st.rerun()
+    st.markdown('### 📄 Selecionar relatório')
+    st.caption('Seleciona o PDF mais recente do InvestingPro. A análise começa automaticamente - não precisas de indicar ticker, empresa ou data.')
+    report_file=st.file_uploader('Relatório InvestingPro (PDF)',type=['pdf'],key='report_pdf_upload',label_visibility='collapsed')
 
-    if run_report and report_file is not None:
+    if report_file is not None:
         try:
-            with st.spinner('A ler o PDF, cruzar os fundamentais e recalcular a técnica atual...'):
-                result=build_report_analysis(report_file)
-            st.session_state['report_result']=result
-            st.session_state['report_parsed']=result['report']
-            st.session_state['report_file_name']=report_file.name
+            raw=report_file.getvalue()
+            upload_hash=hashlib.sha256(raw).hexdigest()
+            if st.session_state.get('_report_last_upload_hash') != upload_hash:
+                with st.spinner('A identificar o relatório, confirmar a versão mais recente e atualizar a análise...'):
+                    result=build_report_analysis(report_file)
+                st.session_state['_report_last_upload_hash']=upload_hash
+                st.session_state['report_result']=result
+                st.session_state['report_parsed']=result['report']
+                entry=result.get('archive_entry') or {}
+                st.session_state['report_file_name']=entry.get('file_name') or report_file.name
+                status=result.get('upload_status')
+                if status in ['first','newer','replaced_same_date']:
+                    save_persistent_state(show_error=False)
+                st.session_state['report_import_status']=status
         except Exception as e:
             st.error(str(e))
+
+    library=st.session_state.get('report_library',{}) or {}
+    if library:
+        with st.expander('Relatórios mais recentes guardados'):
+            options=sorted(library.keys())
+            labels={}
+            for t in options:
+                rep=(library.get(t) or {}).get('report') or {}
+                labels[t]=f"{t} · {rep.get('company') or 'Empresa N/D'} · {rep.get('report_date') or 'data N/D'}"
+            saved_ticker=st.selectbox('Relatório',options,format_func=lambda x:labels.get(x,x),key='saved_report_pick')
+            b1,b2=st.columns([2,1])
+            with b1:
+                if st.button('Atualizar análise deste relatório',use_container_width=True,key='saved_report_analyze'):
+                    try:
+                        with st.spinner('A atualizar preços e análise técnica...'):
+                            rep=dict((library.get(saved_ticker) or {}).get('report') or {})
+                            result=build_report_analysis_from_report(rep)
+                        st.session_state['report_result']=result
+                        st.session_state['report_parsed']=rep
+                        st.session_state['report_file_name']=(library.get(saved_ticker) or {}).get('file_name','')
+                        st.session_state['report_import_status']='saved'
+                    except Exception as e:
+                        st.error(str(e))
+            with b2:
+                if st.button('Remover guardado',use_container_width=True,key='saved_report_remove'):
+                    library.pop(saved_ticker,None)
+                    st.session_state.report_library=library
+                    save_persistent_state(show_error=False)
+                    st.rerun()
+
+    if st.button('Limpar análise do ecrã',use_container_width=True,key='report_clear'):
+        for k in ['report_parsed','report_result','report_file_name','report_import_status']:
+            st.session_state.pop(k,None)
+        st.rerun()
 
     rr=st.session_state.get('report_result')
     if rr:
         report=rr['report']; a=rr['analysis']; dec=rr['decision']; holding=rr['holding']; val=rr['valuation']; zone=rr['zone']
         st.markdown(f"## {a['xtb_ticker']} · {report.get('company') or a['company']}")
         st.caption(f"PDF: {st.session_state.get('report_file_name','')} · relatório {report.get('report_date') or 'data N/D'} · técnica atual até {a['df'].index[-1].date()}")
+        import_status=st.session_state.get('report_import_status')
+        if import_status=='first':
+            st.success('Primeiro relatório desta ação guardado. Nas próximas vezes, a app compara automaticamente a data.')
+        elif import_status=='newer':
+            st.success('Relatório mais recente detetado e guardado. A versão anterior deixou de ser usada na análise atual.')
+        elif import_status=='replaced_same_date':
+            st.info('Foi carregada uma versão diferente com a mesma data; a versão acabada de selecionar passou a ser a referência.')
+        elif import_status in ['older','undated_older']:
+            uploaded=(rr.get('uploaded_report') or {})
+            st.warning(f"O PDF selecionado ({uploaded.get('report_date') or 'data N/D'}) é mais antigo do que o relatório guardado ({report.get('report_date') or 'data N/D'}). A análise abaixo usa automaticamente o mais recente.")
+        elif import_status=='same':
+            st.caption('Este PDF já estava guardado; a parte técnica foi atualizada com os dados de mercado disponíveis.')
+        elif import_status=='saved':
+            st.caption('A usar o relatório mais recente guardado para esta ação; a parte técnica foi recalculada agora.')
         for w in report.get('warnings',[]) or []:
             st.warning('Verificação do PDF: '+w)
 
