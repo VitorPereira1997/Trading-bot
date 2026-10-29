@@ -4197,6 +4197,14 @@ elif PAGE == 'Relatório':
     rr=st.session_state.get('report_result')
     if rr:
         report=rr['report']; a=rr['analysis']; dec=rr['decision']; holding=rr['holding']; val=rr['valuation']; zone=rr['zone']; insiders=rr.get('insiders') or {'available':False,'reason':'Dados SEC indisponíveis.','transactions':[]}
+        if a.get('kind')=='Ação':
+            expected_sec_ticker=_sec_source_symbol(a.get('source_ticker'))
+            if (not insiders) or (str(insiders.get('ticker') or '').upper()!=expected_sec_ticker):
+                insiders=sec_insider_analysis(a.get('xtb_ticker'),a.get('source_ticker'),days=90)
+                rr['insiders']=insiders
+                rr['decision']=_report_decision(a,report,holding,insiders=insiders)
+                dec=rr['decision']
+                st.session_state['report_result']=rr
         st.markdown(f"## {a['xtb_ticker']} · {report.get('company') or a['company']}")
         st.caption(f"PDF: {st.session_state.get('report_file_name','')} · relatório {report.get('report_date') or 'data N/D'} · técnica atual até {a['df'].index[-1].date()}")
         import_status=st.session_state.get('report_import_status')
@@ -4551,6 +4559,16 @@ elif PAGE == 'Analisar':
 
     a=st.session_state.get('v14_analysis')
     if a is not None:
+        # v29.1: uma análise que já estava em sessão antes da atualização também
+        # deve receber automaticamente a camada SEC. A função é cacheada, por
+        # isso reruns normais do Streamlit não geram novas chamadas à SEC.
+        if a.get('kind')=='Ação':
+            expected_sec_ticker=_sec_source_symbol(a.get('source_ticker'))
+            sec_state=st.session_state.get('v29_analysis_insiders')
+            if (not sec_state) or (str(sec_state.get('ticker') or '').upper()!=expected_sec_ticker):
+                with st.spinner('A consultar insiders SEC...'):
+                    sec_state=sec_insider_analysis(a.get('xtb_ticker'),a.get('source_ticker'),days=90)
+                st.session_state['v29_analysis_insiders']=sec_state
         st.markdown(f"## {a['xtb_ticker']} · {a['company']}")
         st.caption(f"{a['market']} · {a['currency']} · dados até {a['df'].index[-1].date()}")
         short_action,short_score=_short_action(a,holding=False)
@@ -4583,8 +4601,21 @@ elif PAGE == 'Analisar':
             st.caption(val.get('reason','Sem cenário de avaliação disponível.'))
 
         st.markdown('### Insiders SEC')
-        sec=st.session_state.get('v29_analysis_insiders') or {'available':False,'reason':'Volta a carregar em Analisar agora para consultar a SEC.','transactions':[]}
+        sec=st.session_state.get('v29_analysis_insiders') or {'available':False,'reason':'A consulta SEC ainda não foi executada.','transactions':[]}
+        refresh_sec=st.button('Atualizar SEC',use_container_width=True,key='v29_refresh_sec') if a.get('kind')=='Ação' else False
+        if refresh_sec:
+            try:
+                sec_insider_analysis.clear()
+            except Exception:
+                pass
+            with st.spinner('A atualizar filings Form 4/4-A...'):
+                sec=sec_insider_analysis(a.get('xtb_ticker'),a.get('source_ticker'),days=90)
+            st.session_state['v29_analysis_insiders']=sec
         render_sec_insiders(sec,key_prefix='analyze_sec')
+        if (not sec.get('available')) and a.get('kind')=='Ação':
+            reason=str(sec.get('reason') or '')
+            if '403' in reason or 'Access Denied' in reason or 'Undeclared Automated Tool' in reason:
+                st.warning('A SEC recusou o pedido automático. Define SEC_USER_AGENT nos Secrets, por exemplo: "Carteira Inteligente teu-email@dominio.pt", e volta a carregar em Atualizar SEC.')
 
         if st.button('Ver alvos, prazo e histórico',use_container_width=True,key='v14_an_detail'):
             try:
