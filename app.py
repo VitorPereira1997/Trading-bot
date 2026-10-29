@@ -2633,11 +2633,169 @@ def _yahoo_tx_code(transaction_text):
     return ''
 
 
+def _clean_yahoo_web_col(col):
+    if isinstance(col, tuple):
+        col=' '.join(str(x) for x in col if str(x)!='nan')
+    return re.sub(r'\s+',' ',str(col or '')).strip()
+
+
+def _parse_web_number(value):
+    if value is None:
+        return None
+    txt=str(value).strip()
+    if not txt or txt.lower() in ('nan','--','n/a','-'):
+        return None
+    mult=1.0
+    upper=txt.upper()
+    if upper.endswith('B'):
+        mult=1_000_000_000.0; txt=txt[:-1]
+    elif upper.endswith('M'):
+        mult=1_000_000.0; txt=txt[:-1]
+    elif upper.endswith('K'):
+        mult=1_000.0; txt=txt[:-1]
+    txt=txt.replace('$','').replace(',','').replace('%','').strip()
+    try:
+        return float(txt)*mult
+    except Exception:
+        m=re.search(r'-?\d+(?:\.\d+)?',txt)
+        return float(m.group(0))*mult if m else None
+
+
+def _split_yahoo_insider_role(raw):
+    text=re.sub(r'\s+',' ',str(raw or '')).strip()
+    if not text:
+        return 'N/D','Insider'
+    role_patterns=[
+        'Chief Executive Officer','Chief Financial Officer','Chief Technology Officer','Chief Operating Officer',
+        'Chief Accounting Officer','Chief Legal Officer','Executive Vice President','Senior Vice President',
+        'Vice President','President','Director','Officer','Chairman','Chair','Founder'
+    ]
+    for role in role_patterns:
+        m=re.search(rf'\b{re.escape(role)}\b',text,re.I)
+        if m:
+            name=text[:m.start()].strip(' -·,') or text
+            return name, text[m.start():].strip()
+    return text,'Insider'
+
+
+def _yahoo_web_insider_fallback(source_ticker,days=90,prior_error=None):
+    """Lê a tabela pública de transações de insiders do Yahoo Finance.
+
+    É um fallback de leitura da página pública; não é SEC direto. Serve para
+    recuperar detalhe por insider quando o módulo yfinance vem vazio.
+    """
+    ticker=str(source_ticker or '').upper().strip()
+    if not ticker:
+        return {'available':False,'reason':'Ticker técnico em falta.','transactions':[],'source':'Indisponível'}
+    url=f'https://finance.yahoo.com/quote/{urllib.parse.quote(ticker)}/insider-transactions/'
+    headers={
+        'User-Agent':'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130 Safari/537.36',
+        'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language':'en-US,en;q=0.9',
+        'Connection':'close',
+    }
+    try:
+        req=urllib.request.Request(url,headers=headers,method='GET')
+        with urllib.request.urlopen(req,timeout=12) as resp:
+            raw=resp.read().decode('utf-8',errors='replace')
+        tables=pd.read_html(io.StringIO(raw))
+    except Exception as e:
+        return {
+            'available':False,
+            'reason':f'SEC direto indisponível e a página alternativa de insiders não pôde ser lida: {e}',
+            'transactions':[],'ticker':ticker,'source':'Indisponível','sec_error':str(prior_error or '')
+        }
+
+    target=None
+    for df in tables:
+        cols=[_clean_yahoo_web_col(c) for c in df.columns]
+        low=' | '.join(c.lower() for c in cols)
+        if 'insider' in low and 'transaction' in low and 'date' in low:
+            target=df.copy(); target.columns=cols; break
+    if target is None or target.empty:
+        return {
+            'available':False,
+            'reason':f'SEC direto indisponível e o Yahoo Finance não apresentou uma tabela de transações para {ticker}.',
+            'transactions':[],'ticker':ticker,'source':'Yahoo Finance web','sec_error':str(prior_error or '')
+        }
+
+    def find_col(words):
+        for c in target.columns:
+            lc=c.lower()
+            if all(w in lc for w in words):
+                return c
+        return None
+
+    insider_col=find_col(['insider'])
+    tx_col=find_col(['transaction'])
+    type_col=find_col(['type'])
+    value_col=find_col(['value'])
+    date_col=find_col(['date'])
+    shares_col=find_col(['shares'])
+    if insider_col is None or tx_col is None or date_col is None:
+        return {
+            'available':False,
+            'reason':f'A tabela pública de insiders de {ticker} mudou de formato e não pôde ser interpretada.',
+            'transactions':[],'ticker':ticker,'source':'Yahoo Finance web','sec_error':str(prior_error or '')
+        }
+
+    cutoff=(pd.Timestamp.now(tz='UTC').normalize()-pd.Timedelta(days=int(days))).tz_localize(None)
+    txs=[]
+    for _,r in target.iterrows():
+        raw_insider=str(r.get(insider_col) or '').strip()
+        if not raw_insider or raw_insider.lower()=='nan':
+            continue
+        name,role=_split_yahoo_insider_role(raw_insider)
+        tx_text=' · '.join(x for x in [str(r.get(tx_col) or '').strip(),str(r.get(type_col) or '').strip() if type_col else ''] if x and x.lower()!='nan')
+        dt=pd.to_datetime(r.get(date_col),errors='coerce')
+        if pd.notna(dt) and dt.tzinfo is not None:
+            dt=dt.tz_convert(None)
+        if pd.notna(dt) and dt < cutoff:
+            continue
+        code=_yahoo_tx_code(tx_text)
+        shares=abs(_parse_web_number(r.get(shares_col))) if shares_col and _parse_web_number(r.get(shares_col)) is not None else None
+        value=abs(_parse_web_number(r.get(value_col))) if value_col and _parse_web_number(r.get(value_col)) is not None else None
+        imp_score,imp_label,imp_why=_sec_role_importance(
+            role,
+            is_director=('director' in role.lower()),
+            is_officer=any(k in role.lower() for k in ['officer','chief','president','vice president','vp','ceo','cfo','coo','cto']),
+            is_ten_percent=False,is_other=True,
+        )
+        txs.append({
+            'insider':name,'role':role,'importance_score':imp_score,'importance':imp_label,'importance_why':imp_why,
+            'date':dt.date().isoformat() if pd.notna(dt) else '', 'code':code,
+            'transaction':_sec_transaction_label(code) if code else (tx_text or 'Operação de insider'),
+            'shares':shares,'price':None,'value':value,'shares_after':None,'holding_pct':None,
+            'scale':_sec_tx_scale(value,None),'is_10b5_1':None,'security':'Ação ordinária','derivative':False,
+            'filing_date':dt.date().isoformat() if pd.notna(dt) else '', 'accession':'','filing_url':url,'form':'',
+            'source':'Yahoo Finance web','raw_text':tx_text,
+        })
+    if not txs:
+        return {
+            'available':False,
+            'reason':f'Não foram encontradas transações de insiders nos últimos {days} dias para {ticker}.',
+            'transactions':[],'ticker':ticker,'source':'Yahoo Finance web','sec_error':str(prior_error or '')
+        }
+
+    score,label,summary,signal_available=_sec_signal(txs)
+    open_market=[x for x in txs if x.get('code') in ('P','S') and not x.get('derivative')]
+    pvalue=sum(float(x.get('value') or 0) for x in open_market if x.get('code')=='P')
+    svalue=sum(float(x.get('value') or 0) for x in open_market if x.get('code')=='S')
+    return {
+        'available':True,'company':'','ticker':ticker,'cik':'','days':int(days),
+        'transactions':txs,'open_market':open_market,'score':score,'label':label,'summary':summary,'signal_available':signal_available,
+        'purchase_count':sum(1 for x in open_market if x.get('code')=='P'),'sale_count':sum(1 for x in open_market if x.get('code')=='S'),
+        'purchase_value':pvalue,'sale_value':svalue,'filings_count':0,'edgar_url':'','updated_at':datetime.now(timezone.utc).isoformat(),
+        'source':'Yahoo Finance web (fallback)','direct_sec':False,'sec_error':str(prior_error or ''),
+        'source_note':'A SEC direta e/ou o módulo yfinance não devolveram detalhe. A app leu a tabela pública de transações de insiders do Yahoo Finance. 10b5-1 e links Form 4 podem ficar indisponíveis.',
+    }
+
+
 def _yahoo_insider_fallback(source_ticker,days=90,sec_error=None):
     """Fallback de disponibilidade quando a SEC bloqueia o IP do Streamlit.
 
-    Usa os módulos de insiders do Yahoo Finance (via yfinance). Não é apresentado
-    como acesso SEC direto; serve para manter a análise útil e transparente.
+    Tenta primeiro os módulos de insiders do yfinance; se vierem vazios, usa
+    a tabela pública de transações do Yahoo Finance.
     """
     try:
         import yfinance as yf
@@ -2650,7 +2808,7 @@ def _yahoo_insider_fallback(source_ticker,days=90,sec_error=None):
         except Exception:
             df=t.insider_transactions
         if df is None or getattr(df,'empty',True):
-            return {'available':False,'reason':f'SEC direto indisponível e sem dados alternativos de insiders para {ticker}.','transactions':[],'ticker':ticker,'source':'Indisponível','sec_error':str(sec_error or '')}
+            return _yahoo_web_insider_fallback(ticker,days=days,prior_error=sec_error)
 
         roster_map={}
         try:
@@ -2709,7 +2867,7 @@ def _yahoo_insider_fallback(source_ticker,days=90,sec_error=None):
             })
 
         if not txs:
-            return {'available':False,'reason':f'SEC direto indisponível e não há transações de insiders nos últimos {days} dias.','transactions':[],'ticker':ticker,'source':'Yahoo Finance','sec_error':str(sec_error or '')}
+            return _yahoo_web_insider_fallback(ticker,days=days,prior_error=sec_error)
         score,label,summary,signal_available=_sec_signal(txs)
         open_market=[x for x in txs if x.get('code') in ('P','S') and not x.get('derivative')]
         pvalue=sum(float(x.get('value') or 0) for x in open_market if x.get('code')=='P')
@@ -2723,7 +2881,7 @@ def _yahoo_insider_fallback(source_ticker,days=90,sec_error=None):
             'source_note':'A SEC bloqueou o pedido direto do servidor. A app mostra temporariamente os dados de insiders disponibilizados pelo Yahoo Finance; confirmações 10b5-1 e Form 4 podem ficar incompletas.',
         }
     except Exception as e:
-        return {'available':False,'reason':f'SEC direto indisponível e o fallback de insiders também falhou: {e}','transactions':[],'ticker':str(source_ticker or '').upper().strip(),'source':'Indisponível','sec_error':str(sec_error or '')}
+        return _yahoo_web_insider_fallback(source_ticker,days=days,prior_error=f'{sec_error or ""}; yfinance: {e}')
 
 
 @st.cache_data(ttl=1800,show_spinner=False)
