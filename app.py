@@ -8,7 +8,9 @@ import urllib.parse
 import hmac
 import hashlib
 import re
+import time
 import unicodedata
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
@@ -51,7 +53,7 @@ def _clear_user_session(clear_auth=False):
         'alerts','portfolio_rows','persistence_status','persistence_last_save','persistence_error',
         '_persistent_loaded','v14_portfolio_rows','v14_hist_revalued','v14_port_detail_result',
         'comparison_df','comparison_time','v14_scan_rows','v20_scan_time','v14_analysis','v14_analysis_detail',
-        'report_parsed','report_result','report_file_name','report_library','_report_last_upload_hash',
+        'report_parsed','report_result','report_file_name','report_library','_report_last_upload_hash','v29_analysis_insiders',
     }
     prefixes=('alert_','risk_','decision_stats_')
     for key in list(st.session_state.keys()):
@@ -2394,6 +2396,352 @@ def _money_abs(value):
     return n*mult
 
 
+
+# -----------------------------------------------------------------------------
+# Insiders SEC / EDGAR
+# -----------------------------------------------------------------------------
+# Usa apenas dados públicos da SEC. O sinal dá prioridade a compras/vendas reais
+# (códigos P/S) e reduz o peso de vendas identificadas como planos 10b5-1.
+
+SEC_BASE='https://www.sec.gov'
+SEC_DATA='https://data.sec.gov'
+
+
+def _sec_user_agent():
+    configured=str(_secret('SEC_USER_AGENT','') or '').strip()
+    if configured:
+        return configured
+    # Identifica a aplicação; o utilizador pode substituir por "Nome email@dominio"
+    # nos Secrets se quiser cumprir a recomendação da SEC com contacto próprio.
+    return 'CarteiraInteligente/1.0 github.com/VitorPereira1997/Trading-bot'
+
+
+def _sec_request(url, json_mode=False, timeout=9):
+    headers={
+        'User-Agent':_sec_user_agent(),
+        'Accept':'application/json,text/xml,application/xml,text/plain,*/*',
+    }
+    req=urllib.request.Request(url,headers=headers,method='GET')
+    try:
+        with urllib.request.urlopen(req,timeout=timeout) as resp:
+            raw=resp.read().decode('utf-8',errors='replace')
+            return json.loads(raw) if json_mode else raw
+    except urllib.error.HTTPError as e:
+        detail=e.read().decode('utf-8',errors='replace')
+        raise RuntimeError(f'SEC/EDGAR HTTP {e.code}: {detail[:180]}') from e
+    except Exception as e:
+        raise RuntimeError(f'Não foi possível consultar a SEC/EDGAR: {e}') from e
+
+
+@st.cache_data(ttl=86400,show_spinner=False)
+def _sec_ticker_map():
+    data=_sec_request(f'{SEC_BASE}/files/company_tickers.json',json_mode=True,timeout=10)
+    out={}
+    for item in (data or {}).values():
+        ticker=str(item.get('ticker') or '').upper().strip()
+        if not ticker:
+            continue
+        out[ticker]={
+            'cik':str(item.get('cik_str') or '').strip(),
+            'title':str(item.get('title') or '').strip(),
+        }
+    return out
+
+
+def _sec_source_symbol(source_ticker):
+    t=str(source_ticker or '').upper().strip()
+    # Yahoo usa '-' em algumas classes; a SEC costuma usar o mesmo formato.
+    return t
+
+
+def _sec_bool_text(root,path):
+    value=str(root.findtext(path) or '').strip().lower()
+    return value in ('1','true','yes','y')
+
+
+def _sec_float_text(node,path):
+    if node is None:
+        return None
+    txt=node.findtext(path)
+    return _safe_float(txt)
+
+
+def _sec_role_importance(officer_title='',is_director=False,is_officer=False,is_ten_percent=False,is_other=False):
+    title=str(officer_title or '').strip()
+    low=title.lower()
+    if low=='ceo' or 'chief executive' in low:
+        return 100,'Muito alta','CEO: lidera a estratégia e execução global e tem elevada visibilidade operacional.'
+    if low=='cfo' or 'chief financial' in low or 'finance officer' in low:
+        return 96,'Muito alta','CFO: acompanha diretamente resultados, margens, cash flow, financiamento e planeamento financeiro.'
+    if 'founder' in low:
+        return 92,'Muito alta','Fundador ativo: normalmente tem forte alinhamento económico e conhecimento profundo do negócio.'
+    if any(k in low for k in ['executive vice president',' evp','senior vice president',' svp']):
+        return 72,'Alta','Executivo sénior: tem visibilidade relevante sobre uma área importante da empresa.'
+    if low=='coo' or 'chief operating' in low or low=='president' or low.startswith('president &') or low.startswith('president and'):
+        return 86,'Alta','Liderança operacional: tem contacto próximo com execução, procura, custos e prioridades do negócio.'
+    if low in ('cto','cio') or any(k in low for k in ['chief technology','chief product','chief information','chief commercial','chief revenue']):
+        return 80,'Alta','Executivo funcional sénior: acompanha uma área material para crescimento e execução da empresa.'
+    if is_officer:
+        return 68,'Alta','Officer da empresa: tem acesso regular a informação operacional e financeira interna.'
+    if is_ten_percent:
+        return 62,'Média-alta','Acionista >10%: tem elevada exposição económica, embora possa não participar na gestão diária.'
+    if is_director:
+        return 55,'Média','Administrador: acompanha estratégia e supervisão, mas normalmente está menos próximo da operação diária.'
+    if is_other:
+        return 45,'Média-baixa','Insider reportado pela SEC com relação especial à empresa; o contexto da função é limitado.'
+    return 40,'Média-baixa','A SEC identifica esta pessoa como reporting owner, mas a função não está suficientemente detalhada.'
+
+
+def _sec_transaction_label(code,acq_disp=None,derivative=False):
+    code=str(code or '').upper().strip()
+    labels={
+        'P':'Compra no mercado','S':'Venda no mercado','A':'Atribuição / award','D':'Entrega/venda à empresa',
+        'F':'Retenção/entrega para impostos','M':'Exercício/conversão de opção','G':'Doação','J':'Outra operação',
+        'C':'Conversão de derivado','X':'Exercício de derivado','O':'Exercício de derivado','V':'Operação voluntariamente reportada',
+    }
+    label=labels.get(code,f'Código {code or "N/D"}')
+    if derivative:
+        label+=' · derivado'
+    return label
+
+
+def _sec_tx_scale(value,holding_pct):
+    v=_safe_float(value); hp=_safe_float(holding_pct)
+    if (hp is not None and hp>=10) or (v is not None and v>=5_000_000):
+        return 'Alta'
+    if (hp is not None and hp>=3) or (v is not None and v>=1_000_000):
+        return 'Média'
+    return 'Baixa'
+
+
+def _sec_parse_ownership(xml_text,filing):
+    if not xml_text or '<ownershipDocument' not in xml_text:
+        return []
+    try:
+        root=ET.fromstring(xml_text)
+    except Exception:
+        return []
+
+    owner=root.find('.//reportingOwner')
+    name=str(root.findtext('.//reportingOwner/reportingOwnerId/rptOwnerName') or 'N/D').strip()
+    rel=root.find('.//reportingOwner/reportingOwnerRelationship')
+    officer_title=str(rel.findtext('officerTitle') if rel is not None else '' or '').strip()
+    is_director=_sec_bool_text(root,'.//reportingOwner/reportingOwnerRelationship/isDirector')
+    is_officer=_sec_bool_text(root,'.//reportingOwner/reportingOwnerRelationship/isOfficer')
+    is_ten=_sec_bool_text(root,'.//reportingOwner/reportingOwnerRelationship/isTenPercentOwner')
+    is_other=_sec_bool_text(root,'.//reportingOwner/reportingOwnerRelationship/isOther')
+    imp_score,imp_label,imp_why=_sec_role_importance(officer_title,is_director,is_officer,is_ten,is_other)
+    role=officer_title or ('Administrador' if is_director else ('Acionista >10%' if is_ten else ('Officer' if is_officer else 'Insider SEC')))
+
+    low=xml_text.lower()
+    plan_10b5=('10b5-1' in low or '10b5 1' in low)
+    out=[]
+    for derivative,path in [(False,'.//nonDerivativeTransaction'),(True,'.//derivativeTransaction')]:
+        for tx in root.findall(path):
+            date=str(tx.findtext('transactionDate/value') or filing.get('filing_date') or '').strip()
+            code=str(tx.findtext('transactionCoding/transactionCode') or '').upper().strip()
+            shares=_sec_float_text(tx,'transactionAmounts/transactionShares/value')
+            price=_sec_float_text(tx,'transactionAmounts/transactionPricePerShare/value')
+            acq=str(tx.findtext('transactionAmounts/transactionAcquiredDisposedCode/value') or '').upper().strip()
+            after=_sec_float_text(tx,'postTransactionAmounts/sharesOwnedFollowingTransaction/value')
+            security=str(tx.findtext('securityTitle/value') or '').strip()
+            value=(shares*price) if (shares is not None and price is not None) else None
+            before=None
+            if shares is not None and after is not None:
+                if code=='P' or acq=='A':
+                    before=max(0.0,after-shares)
+                elif code=='S' or acq=='D':
+                    before=after+shares
+            holding_pct=(shares/before*100.0) if (before is not None and before>0 and shares is not None) else None
+            out.append({
+                'insider':name,'role':role,'importance_score':imp_score,'importance':imp_label,'importance_why':imp_why,
+                'date':date,'code':code,'transaction':_sec_transaction_label(code,acq,derivative),'shares':shares,'price':price,
+                'value':value,'shares_after':after,'holding_pct':holding_pct,'scale':_sec_tx_scale(value,holding_pct),
+                'is_10b5_1':bool(plan_10b5),'security':security,'derivative':derivative,
+                'filing_date':filing.get('filing_date'),'accession':filing.get('accession'),'filing_url':filing.get('filing_url'),
+                'form':filing.get('form'),
+            })
+    return out
+
+
+def _sec_signal(transactions):
+    open_market=[t for t in transactions if t.get('code') in ('P','S') and not t.get('derivative')]
+    if not open_market:
+        return 50.0,'Neutro','Sem compras/vendas relevantes no mercado aberto no período analisado.',False
+    owner_contrib={}
+    buyers=set(); sellers=set()
+    for t in open_market:
+        imp=float(t.get('importance_score') or 40)/100.0
+        hp=_safe_float(t.get('holding_pct')); val=_safe_float(t.get('value'))
+        size=0.90
+        if hp is not None:
+            if hp>=20: size=1.55
+            elif hp>=10: size=1.35
+            elif hp>=3: size=1.12
+        if val is not None:
+            if val>=10_000_000: size+=0.25
+            elif val>=1_000_000: size+=0.15
+        if t.get('code')=='P':
+            sign=1.0; buyers.add(t.get('insider'))
+            plan_factor=0.80 if t.get('is_10b5_1') else 1.0
+        else:
+            sign=-0.65; sellers.add(t.get('insider'))
+            plan_factor=0.35 if t.get('is_10b5_1') else 1.0
+        contribution=sign*imp*size*plan_factor
+        owner=str(t.get('insider') or 'N/D')
+        owner_contrib[owner]=max(-2.0,min(2.0,owner_contrib.get(owner,0.0)+contribution))
+    raw=sum(owner_contrib.values())
+    if len(buyers)>=2: raw+=0.35*(len(buyers)-1)
+    if len(sellers)>=2: raw-=0.12*(len(sellers)-1)
+    score=50.0+30.0*math.tanh(raw/2.5)
+    score=max(15.0,min(85.0,score))
+    if score>=67: label='Positivo forte'
+    elif score>=56: label='Positivo'
+    elif score<=33: label='Negativo forte'
+    elif score<=44: label='Negativo'
+    else: label='Neutro'
+    p=sum(1 for t in open_market if t.get('code')=='P')
+    s=sum(1 for t in open_market if t.get('code')=='S')
+    pb=len(buyers); ps=len(sellers)
+    summary=f'{p} compra(s) por {pb} insider(s) e {s} venda(s) por {ps} insider(s) no mercado aberto.'
+    return round(score,1),label,summary,True
+
+
+@st.cache_data(ttl=1800,show_spinner=False)
+def sec_insider_analysis(xtb_ticker,source_ticker,days=90,max_filings=10):
+    xtb=str(xtb_ticker or '').upper().strip(); source=_sec_source_symbol(source_ticker)
+    if not (xtb.endswith('.US') or ('.' not in source and source)):
+        return {'available':False,'reason':'SEC/EDGAR aplica-se a emissores/reporting owners sujeitos às regras dos EUA.','transactions':[]}
+    try:
+        mapping=_sec_ticker_map(); company=mapping.get(source)
+        if not company:
+            return {'available':False,'reason':f'Ticker {source} não encontrado no mapa ticker/CIK da SEC.','transactions':[]}
+        cik=str(company.get('cik') or '').zfill(10)
+        data=_sec_request(f'{SEC_DATA}/submissions/CIK{cik}.json',json_mode=True,timeout=10)
+        recent=((data or {}).get('filings') or {}).get('recent') or {}
+        forms=recent.get('form') or []
+        cutoff=(pd.Timestamp.now(tz='UTC').normalize()-pd.Timedelta(days=int(days))).tz_localize(None)
+        candidates=[]
+        for i,form in enumerate(forms):
+            if form not in ('4','4/A'):
+                continue
+            filing_date=str((recent.get('filingDate') or ['']*len(forms))[i] or '')
+            dt=pd.to_datetime(filing_date,errors='coerce')
+            if pd.notna(dt) and dt<cutoff:
+                continue
+            accession=str((recent.get('accessionNumber') or ['']*len(forms))[i] or '')
+            primary=str((recent.get('primaryDocument') or ['']*len(forms))[i] or '')
+            if not accession:
+                continue
+            candidates.append({'form':form,'filing_date':filing_date,'accession':accession,'primary':primary})
+        # Form 4/A primeiro quando partilha a mesma data, para que a correção prevaleça no dedupe.
+        candidates=sorted(candidates,key=lambda x:(x.get('filing_date',''),x.get('form')=='4/A'),reverse=True)[:int(max_filings)]
+        cik_dir=str(int(cik))
+        txs=[]
+        for filing in candidates:
+            acc_no=filing['accession'].replace('-','')
+            primary=filing.get('primary') or 'ownership.xml'
+            filing_url=f'{SEC_BASE}/Archives/edgar/data/{cik_dir}/{acc_no}/{primary}'
+            filing['filing_url']=filing_url
+            xml=''
+            urls=[filing_url]
+            raw_url=f'{SEC_BASE}/Archives/edgar/data/{cik_dir}/{acc_no}/ownership.xml'
+            if raw_url not in urls: urls.append(raw_url)
+            for u in urls:
+                try:
+                    xml=_sec_request(u,json_mode=False,timeout=9)
+                    if '<ownershipDocument' in xml:
+                        filing['filing_url']=u
+                        break
+                except Exception:
+                    xml=''
+            if xml and '<ownershipDocument' in xml:
+                txs.extend(_sec_parse_ownership(xml,filing))
+            time.sleep(0.12)
+        # Amendments podem repetir a mesma transação; mantém a versão mais recente.
+        dedup=[]; seen=set()
+        for t in txs:
+            key=(str(t.get('insider')),str(t.get('date')),round(float(t.get('shares') or 0),6),round(float(t.get('price') or 0),6),str(t.get('security')))
+            if key in seen: continue
+            seen.add(key); dedup.append(t)
+        txs=dedup
+        score,label,summary,signal_available=_sec_signal(txs)
+        open_market=[t for t in txs if t.get('code') in ('P','S') and not t.get('derivative')]
+        pvalue=sum(float(t.get('value') or 0) for t in open_market if t.get('code')=='P')
+        svalue=sum(float(t.get('value') or 0) for t in open_market if t.get('code')=='S')
+        return {
+            'available':True,'company':company.get('title') or (data or {}).get('name'),'ticker':source,'cik':cik,'days':int(days),
+            'transactions':txs,'open_market':open_market,'score':score,'label':label,'summary':summary,'signal_available':signal_available,
+            'purchase_count':sum(1 for t in open_market if t.get('code')=='P'),'sale_count':sum(1 for t in open_market if t.get('code')=='S'),
+            'purchase_value':pvalue,'sale_value':svalue,'filings_count':len(candidates),
+            'edgar_url':f'{SEC_BASE}/edgar/browse/?CIK={cik}&owner=only&action=getcompany',
+            'updated_at':datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {'available':False,'reason':str(e),'transactions':[],'ticker':source}
+
+
+def _sec_money(value):
+    v=_safe_float(value)
+    if v is None: return 'N/D'
+    if abs(v)>=1_000_000_000: return f'${v/1_000_000_000:.2f} mil M'
+    if abs(v)>=1_000_000: return f'${v/1_000_000:.2f} M'
+    if abs(v)>=1_000: return f'${v/1_000:.1f} mil'
+    return f'${v:,.0f}'
+
+
+def _sec_signal_icon(label):
+    low=str(label or '').lower()
+    if 'positivo' in low: return '🟢'
+    if 'negativo' in low: return '🔴'
+    return '⚪'
+
+
+def render_sec_insiders(sec,key_prefix='sec'):
+    if not sec or not sec.get('available'):
+        reason=(sec or {}).get('reason') or 'Dados SEC indisponíveis para esta ação.'
+        st.info(f'**Insiders SEC:** {reason}')
+        return
+    icon=_sec_signal_icon(sec.get('label'))
+    st.markdown(f"#### {icon} Insiders SEC · {sec.get('label','Neutro')}")
+    st.caption(f"Últimos {sec.get('days',90)} dias · Form 4/4-A públicos · sinal {sec.get('score',50):.0f}/100. É uma camada de confirmação, não uma ordem de compra/venda.")
+    c1,c2,c3=st.columns(3)
+    c1.metric('Compras P',str(sec.get('purchase_count',0)),_sec_money(sec.get('purchase_value')))
+    c2.metric('Vendas S',str(sec.get('sale_count',0)),_sec_money(sec.get('sale_value')))
+    c3.metric('Sinal insiders',str(sec.get('label','Neutro')),f"{sec.get('score',50):.0f}/100")
+    st.write(sec.get('summary') or '')
+    open_market=sec.get('open_market') or []
+    if open_market:
+        rows=[]
+        for t in open_market:
+            rows.append({
+                'Data':t.get('date'),'Insider':t.get('insider'),'Cargo':t.get('role'),'Importância':t.get('importance'),
+                'Operação':t.get('transaction'),'Ações':t.get('shares'),'Preço':t.get('price'),'Valor':t.get('value'),
+                '% posição prévia':t.get('holding_pct'),'10b5-1':'Sim' if t.get('is_10b5_1') else 'Não','Magnitude':t.get('scale'),
+                'Filing SEC':t.get('filing_url'),
+            })
+        df=pd.DataFrame(rows)
+        st.dataframe(df,hide_index=True,use_container_width=True,column_config={
+            'Preço':st.column_config.NumberColumn(format='$%.2f'),
+            'Valor':st.column_config.NumberColumn(format='$%.0f'),
+            '% posição prévia':st.column_config.NumberColumn(format='%.1f%%'),
+            'Filing SEC':st.column_config.LinkColumn(display_text='Abrir'),
+        })
+        with st.expander('Porque é que cada insider importa?'):
+            unique={}
+            for t in open_market:
+                unique[(t.get('insider'),t.get('role'))]=(t.get('importance'),t.get('importance_why'))
+            for (name,role),(importance,why) in unique.items():
+                st.markdown(f"**{name} · {role} · importância {importance}**")
+                st.write(why)
+        if any(t.get('is_10b5_1') for t in open_market):
+            st.caption('Vendas identificadas em filings com referência a plano 10b5-1 recebem menos peso no sinal, porque podem ter sido planeadas antecipadamente.')
+    else:
+        st.caption('Não foram encontradas compras/vendas P/S no mercado aberto nos filings analisados. Awards, opções, impostos e outras operações não são tratados como sinal direcional forte.')
+    if sec.get('edgar_url'):
+        st.markdown(f"[Abrir histórico de ownership filings na SEC]({sec['edgar_url']})")
+
+
 def _report_pt_text(text, kind='neutral'):
     """Converte frases típicas de relatórios financeiros em inglês para PT-PT.
 
@@ -2768,7 +3116,7 @@ def _report_analyst_score(report, a):
     return round(sum(v*w for v,w in valid)/sum(w for _,w in valid),1) if valid else None
 
 
-def _report_decision(a, report, holding=False):
+def _report_decision(a, report, holding=False, insiders=None):
     fund_raw=_safe_float(a.get('fund_score')); tech=_safe_float(a.get('tech_score'))
     rating_values=[_safe_float(report.get(k)) for k in ['growth_rating','profitability_rating','cashflow_rating']]
     rating_values=[x*10 for x in rating_values if x is not None]
@@ -2781,8 +3129,15 @@ def _report_decision(a, report, holding=False):
         fund=min(96.0,float(fund))
     val,val_parts=_report_valuation_score(report,a)
     analyst=_report_analyst_score(report,a)
+    insider_score=None
+    if insiders and insiders.get('available') and insiders.get('signal_available'):
+        insider_score=_safe_float(insiders.get('score'))
     parts=[]
-    for value,weight in [(fund,0.40),(val,0.25),(tech,0.25),(analyst,0.10)]:
+    if insider_score is not None:
+        weighted=[(fund,0.38),(val,0.24),(tech,0.23),(analyst,0.10),(insider_score,0.05)]
+    else:
+        weighted=[(fund,0.40),(val,0.25),(tech,0.25),(analyst,0.10)]
+    for value,weight in weighted:
         if value is not None: parts.append((value,weight))
     overall=round(sum(v*w for v,w in parts)/sum(w for _,w in parts),1) if parts else None
     if holding:
@@ -2817,7 +3172,7 @@ def _report_decision(a, report, holding=False):
     elif confidence>=60: conf_label='Média-alta'
     elif confidence>=45: conf_label='Média'
     else: conf_label='Baixa'
-    return {'action':action,'overall':overall,'fundamental':fund,'valuation':val,'technical':tech,'analysts':analyst,'confidence':confidence,'confidence_label':conf_label,'valuation_parts':val_parts,'report_age_days':report_age_days}
+    return {'action':action,'overall':overall,'fundamental':fund,'valuation':val,'technical':tech,'analysts':analyst,'insiders':insider_score,'confidence':confidence,'confidence_label':conf_label,'valuation_parts':val_parts,'report_age_days':report_age_days}
 
 
 def _report_summary_reasons(a, report, decision):
@@ -2903,10 +3258,11 @@ def build_report_analysis_from_report(report):
     a=analyze_asset(xtb,detailed=False,instrument_type='Ação')
     a=_analysis_with_report(a,report)
     holding=_portfolio_holds_ticker(xtb,a.get('source_ticker'))
-    decision=_report_decision(a,report,holding)
+    insiders=sec_insider_analysis(a.get('xtb_ticker'),a.get('source_ticker'),days=90) if a.get('kind')=='Ação' else {'available':False,'reason':'Insiders SEC não aplicáveis a este tipo de instrumento.','transactions':[]}
+    decision=_report_decision(a,report,holding,insiders=insiders)
     valuation=valuation_scenarios(a)
     zone=entry_zone(a,valuation)
-    return {'report':report,'analysis':a,'decision':decision,'holding':holding,'valuation':valuation,'zone':zone}
+    return {'report':report,'analysis':a,'decision':decision,'holding':holding,'valuation':valuation,'zone':zone,'insiders':insiders}
 
 
 def build_report_analysis(uploaded_file):
@@ -3840,7 +4196,7 @@ elif PAGE == 'Relatório':
 
     rr=st.session_state.get('report_result')
     if rr:
-        report=rr['report']; a=rr['analysis']; dec=rr['decision']; holding=rr['holding']; val=rr['valuation']; zone=rr['zone']
+        report=rr['report']; a=rr['analysis']; dec=rr['decision']; holding=rr['holding']; val=rr['valuation']; zone=rr['zone']; insiders=rr.get('insiders') or {'available':False,'reason':'Dados SEC indisponíveis.','transactions':[]}
         st.markdown(f"## {a['xtb_ticker']} · {report.get('company') or a['company']}")
         st.caption(f"PDF: {st.session_state.get('report_file_name','')} · relatório {report.get('report_date') or 'data N/D'} · técnica atual até {a['df'].index[-1].date()}")
         import_status=st.session_state.get('report_import_status')
@@ -3876,6 +4232,11 @@ elif PAGE == 'Relatório':
         k2.metric('Avaliação',_fmt_num(dec.get('valuation'),0,'/100'))
         k3.metric('Técnica atual',_fmt_num(dec.get('technical'),0,'/100'))
         k4.metric('Analistas',_fmt_num(dec.get('analysts'),0,'/100'))
+        if insiders.get('available'):
+            st.markdown(f"**Insiders SEC:** {_sec_signal_icon(insiders.get('label'))} **{insiders.get('label','Neutro')}** · {insiders.get('score',50):.0f}/100 · {insiders.get('summary','')}")
+            st.caption('O sinal SEC pesa apenas 5% no score combinado quando existem compras/vendas P/S; nunca força sozinho uma compra ou venda.')
+        else:
+            st.caption(f"Insiders SEC: {insiders.get('reason','indisponível para esta ação.')}")
 
         st.markdown('### Resumo')
         for reason in reasons:
@@ -3898,7 +4259,7 @@ elif PAGE == 'Relatório':
             st.markdown('**Porque a decisão é defensiva**')
             st.write('A regra exige deterioração suficientemente forte dos fundamentais e/ou da técnica; não vende apenas porque o preço caiu.')
 
-        tf,ta,tt,tr,td=st.tabs(['Fundamentais','Avaliação','Técnica','Riscos & catalisadores','Dados do PDF'])
+        tf,ta,tt,ti,tr,td=st.tabs(['Fundamentais','Avaliação','Técnica','Insiders SEC','Riscos & catalisadores','Dados do PDF'])
         with tf:
             st.markdown('#### Leitura fundamental')
             f1,f2,f3=st.columns(3)
@@ -3950,6 +4311,9 @@ elif PAGE == 'Relatório':
             t3.metric('Retorno 60d',_fmt_num(float(a['row']['RET60']),1,'%'))
             t4.metric('PDF na data',_pdf_technical_pt(report.get('pdf_technical')))
             st.caption('A técnica do PDF é apenas referência histórica. A decisão usa a técnica recalculada com preços atuais.')
+
+        with ti:
+            render_sec_insiders(insiders,key_prefix='report_sec')
 
         with tr:
             st.caption('Leitura automática em português. Números, percentagens e siglas financeiras são preservados; o texto original fica disponível para conferência.')
@@ -4172,9 +4536,14 @@ elif PAGE == 'Analisar':
         if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
             load_persistent_state()
         try:
-            with st.spinner('A analisar o essencial...'):
+            with st.spinner('A analisar o essencial e consultar insiders SEC quando aplicável...'):
                 a=analyze_asset(ticker,None if market_hint=='Auto' else market_hint,detailed=False,instrument_type=instrument_hint,source_override=(source_hint.upper().strip() or None))
+                if a.get('kind')=='Ação':
+                    sec=sec_insider_analysis(a.get('xtb_ticker'),a.get('source_ticker'),days=90)
+                else:
+                    sec={'available':False,'reason':'Insiders SEC não aplicáveis a este tipo de instrumento.','transactions':[]}
             st.session_state['v14_analysis']=a
+            st.session_state['v29_analysis_insiders']=sec
             st.session_state.pop('v14_analysis_detail',None)
             add_watchlist(a['xtb_ticker'])
         except Exception as e:
@@ -4212,6 +4581,10 @@ elif PAGE == 'Analisar':
             st.caption(f"Confiança {val['confidence']} · {val['sources']} · {val['method']}")
         elif a.get('kind') in ['Ação','CFD']:
             st.caption(val.get('reason','Sem cenário de avaliação disponível.'))
+
+        st.markdown('### Insiders SEC')
+        sec=st.session_state.get('v29_analysis_insiders') or {'available':False,'reason':'Volta a carregar em Analisar agora para consultar a SEC.','transactions':[]}
+        render_sec_insiders(sec,key_prefix='analyze_sec')
 
         if st.button('Ver alvos, prazo e histórico',use_container_width=True,key='v14_an_detail'):
             try:
