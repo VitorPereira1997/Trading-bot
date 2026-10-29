@@ -2420,6 +2420,9 @@ def _sec_request(url, json_mode=False, timeout=9):
     headers={
         'User-Agent':_sec_user_agent(),
         'Accept':'application/json,text/xml,application/xml,text/plain,*/*',
+        'Accept-Encoding':'identity',
+        'Accept-Language':'en-US,en;q=0.8',
+        'Connection':'close',
     }
     req=urllib.request.Request(url,headers=headers,method='GET')
     try:
@@ -2427,8 +2430,14 @@ def _sec_request(url, json_mode=False, timeout=9):
             raw=resp.read().decode('utf-8',errors='replace')
             return json.loads(raw) if json_mode else raw
     except urllib.error.HTTPError as e:
+        if e.code == 403:
+            raise RuntimeError('SEC/EDGAR recusou o acesso automático (HTTP 403).') from e
+        if e.code == 429:
+            raise RuntimeError('SEC/EDGAR limitou temporariamente os pedidos (HTTP 429).') from e
         detail=e.read().decode('utf-8',errors='replace')
-        raise RuntimeError(f'SEC/EDGAR HTTP {e.code}: {detail[:180]}') from e
+        clean=re.sub(r'<[^>]+>',' ',detail)
+        clean=re.sub(r'\s+',' ',clean).strip()
+        raise RuntimeError(f'SEC/EDGAR HTTP {e.code}: {clean[:160]}') from e
     except Exception as e:
         raise RuntimeError(f'Não foi possível consultar a SEC/EDGAR: {e}') from e
 
@@ -2607,6 +2616,116 @@ def _sec_signal(transactions):
     return round(score,1),label,summary,True
 
 
+def _yahoo_tx_code(transaction_text):
+    low=str(transaction_text or '').lower()
+    if any(k in low for k in ['purchase','purchased','buy','bought','acquisition','acquired']):
+        return 'P'
+    if any(k in low for k in ['sale','sold','sell','disposition','disposed']):
+        return 'S'
+    if any(k in low for k in ['gift','donation']):
+        return 'G'
+    if any(k in low for k in ['tax','withhold']):
+        return 'F'
+    if any(k in low for k in ['exercise','option','conversion','convert']):
+        return 'M'
+    if any(k in low for k in ['award','grant','restricted stock','rsu']):
+        return 'A'
+    return ''
+
+
+def _yahoo_insider_fallback(source_ticker,days=90,sec_error=None):
+    """Fallback de disponibilidade quando a SEC bloqueia o IP do Streamlit.
+
+    Usa os módulos de insiders do Yahoo Finance (via yfinance). Não é apresentado
+    como acesso SEC direto; serve para manter a análise útil e transparente.
+    """
+    try:
+        import yfinance as yf
+        ticker=str(source_ticker or '').upper().strip()
+        if not ticker:
+            raise ValueError('Ticker técnico em falta.')
+        t=yf.Ticker(ticker)
+        try:
+            df=t.get_insider_transactions()
+        except Exception:
+            df=t.insider_transactions
+        if df is None or getattr(df,'empty',True):
+            return {'available':False,'reason':f'SEC direto indisponível e sem dados alternativos de insiders para {ticker}.','transactions':[],'ticker':ticker,'source':'Indisponível','sec_error':str(sec_error or '')}
+
+        roster_map={}
+        try:
+            roster=t.get_insider_roster_holders()
+            if roster is not None and not roster.empty:
+                for _,rr in roster.iterrows():
+                    nm=str(rr.get('Name') or '').strip().upper()
+                    if nm:
+                        roster_map[nm]={
+                            'position':str(rr.get('Position') or '').strip(),
+                            'direct':_safe_float(rr.get('Shares Owned Directly')),
+                            'url':str(rr.get('URL') or '').strip(),
+                        }
+        except Exception:
+            pass
+
+        cutoff=(pd.Timestamp.now(tz='UTC').normalize()-pd.Timedelta(days=int(days))).tz_localize(None)
+        txs=[]
+        for _,r in df.iterrows():
+            dt=pd.to_datetime(r.get('Start Date'),errors='coerce')
+            if pd.notna(dt) and dt.tzinfo is not None:
+                dt=dt.tz_convert(None)
+            if pd.notna(dt) and dt < cutoff:
+                continue
+            name=str(r.get('Insider') or 'N/D').strip()
+            roster=roster_map.get(name.upper(),{})
+            role=str(r.get('Position') or roster.get('position') or 'Insider').strip()
+            imp_score,imp_label,imp_why=_sec_role_importance(
+                role,
+                is_director=('director' in role.lower()),
+                is_officer=any(k in role.lower() for k in ['officer','chief','president','vice president','vp','ceo','cfo','coo','cto']),
+                is_ten_percent=False,
+                is_other=True,
+            )
+            tx_text=' · '.join([str(r.get('Transaction') or '').strip(),str(r.get('Text') or '').strip()]).strip(' ·')
+            code=_yahoo_tx_code(tx_text)
+            shares=abs(_safe_float(r.get('Shares')) or 0.0) or None
+            value=abs(_safe_float(r.get('Value')) or 0.0) or None
+            price=(value/shares) if (value is not None and shares not in (None,0)) else None
+            shares_after=_safe_float(roster.get('direct'))
+            before=None
+            if shares is not None and shares_after is not None:
+                if code=='P': before=max(0.0,shares_after-shares)
+                elif code=='S': before=shares_after+shares
+            holding_pct=(shares/before*100.0) if (before is not None and before>0 and shares is not None) else None
+            url=str(r.get('URL') or roster.get('url') or '').strip()
+            plan_10b5=True if '10b5-1' in tx_text.lower() or '10b5 1' in tx_text.lower() else None
+            txs.append({
+                'insider':name,'role':role,'importance_score':imp_score,'importance':imp_label,'importance_why':imp_why,
+                'date':dt.date().isoformat() if pd.notna(dt) else '', 'code':code,
+                'transaction':_sec_transaction_label(code) if code else (tx_text or 'Operação de insider'),
+                'shares':shares,'price':price,'value':value,'shares_after':shares_after,'holding_pct':holding_pct,
+                'scale':_sec_tx_scale(value,holding_pct),'is_10b5_1':plan_10b5,'security':'Ação ordinária','derivative':False,
+                'filing_date':dt.date().isoformat() if pd.notna(dt) else '', 'accession':'','filing_url':url,'form':'',
+                'source':'Yahoo Finance', 'raw_text':tx_text,
+            })
+
+        if not txs:
+            return {'available':False,'reason':f'SEC direto indisponível e não há transações de insiders nos últimos {days} dias.','transactions':[],'ticker':ticker,'source':'Yahoo Finance','sec_error':str(sec_error or '')}
+        score,label,summary,signal_available=_sec_signal(txs)
+        open_market=[x for x in txs if x.get('code') in ('P','S') and not x.get('derivative')]
+        pvalue=sum(float(x.get('value') or 0) for x in open_market if x.get('code')=='P')
+        svalue=sum(float(x.get('value') or 0) for x in open_market if x.get('code')=='S')
+        return {
+            'available':True,'company':'','ticker':ticker,'cik':'','days':int(days),
+            'transactions':txs,'open_market':open_market,'score':score,'label':label,'summary':summary,'signal_available':signal_available,
+            'purchase_count':sum(1 for x in open_market if x.get('code')=='P'),'sale_count':sum(1 for x in open_market if x.get('code')=='S'),
+            'purchase_value':pvalue,'sale_value':svalue,'filings_count':0,'edgar_url':'','updated_at':datetime.now(timezone.utc).isoformat(),
+            'source':'Yahoo Finance (fallback)','direct_sec':False,'sec_error':str(sec_error or ''),
+            'source_note':'A SEC bloqueou o pedido direto do servidor. A app mostra temporariamente os dados de insiders disponibilizados pelo Yahoo Finance; confirmações 10b5-1 e Form 4 podem ficar incompletas.',
+        }
+    except Exception as e:
+        return {'available':False,'reason':f'SEC direto indisponível e o fallback de insiders também falhou: {e}','transactions':[],'ticker':str(source_ticker or '').upper().strip(),'source':'Indisponível','sec_error':str(sec_error or '')}
+
+
 @st.cache_data(ttl=1800,show_spinner=False)
 def sec_insider_analysis(xtb_ticker,source_ticker,days=90,max_filings=10):
     xtb=str(xtb_ticker or '').upper().strip(); source=_sec_source_symbol(source_ticker)
@@ -2675,10 +2794,11 @@ def sec_insider_analysis(xtb_ticker,source_ticker,days=90,max_filings=10):
             'purchase_count':sum(1 for t in open_market if t.get('code')=='P'),'sale_count':sum(1 for t in open_market if t.get('code')=='S'),
             'purchase_value':pvalue,'sale_value':svalue,'filings_count':len(candidates),
             'edgar_url':f'{SEC_BASE}/edgar/browse/?CIK={cik}&owner=only&action=getcompany',
-            'updated_at':datetime.now(timezone.utc).isoformat(),
+            'updated_at':datetime.now(timezone.utc).isoformat(),'source':'SEC/EDGAR direto','direct_sec':True,
+            'source_note':'Dados obtidos diretamente dos filings Form 4/4-A da SEC/EDGAR.',
         }
     except Exception as e:
-        return {'available':False,'reason':str(e),'transactions':[],'ticker':source}
+        return _yahoo_insider_fallback(source,days=days,sec_error=e)
 
 
 def _sec_money(value):
@@ -2704,7 +2824,13 @@ def render_sec_insiders(sec,key_prefix='sec'):
         return
     icon=_sec_signal_icon(sec.get('label'))
     st.markdown(f"#### {icon} Insiders SEC · {sec.get('label','Neutro')}")
-    st.caption(f"Últimos {sec.get('days',90)} dias · Form 4/4-A públicos · sinal {sec.get('score',50):.0f}/100. É uma camada de confirmação, não uma ordem de compra/venda.")
+    source_label=sec.get('source') or ('SEC/EDGAR direto' if sec.get('direct_sec') else 'Fonte alternativa')
+    st.caption(f"Últimos {sec.get('days',90)} dias · {source_label} · sinal {sec.get('score',50):.0f}/100. É uma camada de confirmação, não uma ordem de compra/venda.")
+    if sec.get('source_note'):
+        if sec.get('direct_sec'):
+            st.caption(sec.get('source_note'))
+        else:
+            st.warning(sec.get('source_note'))
     c1,c2,c3=st.columns(3)
     c1.metric('Compras P',str(sec.get('purchase_count',0)),_sec_money(sec.get('purchase_value')))
     c2.metric('Vendas S',str(sec.get('sale_count',0)),_sec_money(sec.get('sale_value')))
@@ -2717,15 +2843,15 @@ def render_sec_insiders(sec,key_prefix='sec'):
             rows.append({
                 'Data':t.get('date'),'Insider':t.get('insider'),'Cargo':t.get('role'),'Importância':t.get('importance'),
                 'Operação':t.get('transaction'),'Ações':t.get('shares'),'Preço':t.get('price'),'Valor':t.get('value'),
-                '% posição prévia':t.get('holding_pct'),'10b5-1':'Sim' if t.get('is_10b5_1') else 'Não','Magnitude':t.get('scale'),
-                'Filing SEC':t.get('filing_url'),
+                '% posição prévia':t.get('holding_pct'),'10b5-1':('Sim' if t.get('is_10b5_1') is True else ('Não' if t.get('is_10b5_1') is False else 'N/D')),'Magnitude':t.get('scale'),
+                'Fonte / detalhe':t.get('filing_url'),
             })
         df=pd.DataFrame(rows)
         st.dataframe(df,hide_index=True,use_container_width=True,column_config={
             'Preço':st.column_config.NumberColumn(format='$%.2f'),
             'Valor':st.column_config.NumberColumn(format='$%.0f'),
             '% posição prévia':st.column_config.NumberColumn(format='%.1f%%'),
-            'Filing SEC':st.column_config.LinkColumn(display_text='Abrir'),
+            'Fonte / detalhe':st.column_config.LinkColumn(display_text='Abrir'),
         })
         with st.expander('Porque é que cada insider importa?'):
             unique={}
@@ -2734,8 +2860,10 @@ def render_sec_insiders(sec,key_prefix='sec'):
             for (name,role),(importance,why) in unique.items():
                 st.markdown(f"**{name} · {role} · importância {importance}**")
                 st.write(why)
-        if any(t.get('is_10b5_1') for t in open_market):
-            st.caption('Vendas identificadas em filings com referência a plano 10b5-1 recebem menos peso no sinal, porque podem ter sido planeadas antecipadamente.')
+        if any(t.get('is_10b5_1') is True for t in open_market):
+            st.caption('Vendas identificadas com referência a plano 10b5-1 recebem menos peso no sinal, porque podem ter sido planeadas antecipadamente.')
+        elif not sec.get('direct_sec'):
+            st.caption('No fallback, 10b5-1 pode aparecer como N/D porque o detalhe completo do Form 4 não está disponível diretamente.')
     else:
         st.caption('Não foram encontradas compras/vendas P/S no mercado aberto nos filings analisados. Awards, opções, impostos e outras operações não são tratados como sinal direcional forte.')
     if sec.get('edgar_url'):
@@ -4559,13 +4687,14 @@ elif PAGE == 'Analisar':
 
     a=st.session_state.get('v14_analysis')
     if a is not None:
-        # v29.1: uma análise que já estava em sessão antes da atualização também
+        # v29.2: uma análise que já estava em sessão antes da atualização também
         # deve receber automaticamente a camada SEC. A função é cacheada, por
         # isso reruns normais do Streamlit não geram novas chamadas à SEC.
         if a.get('kind')=='Ação':
             expected_sec_ticker=_sec_source_symbol(a.get('source_ticker'))
             sec_state=st.session_state.get('v29_analysis_insiders')
-            if (not sec_state) or (str(sec_state.get('ticker') or '').upper()!=expected_sec_ticker):
+            stale_blocked=bool(sec_state) and (not sec_state.get('available')) and any(k in str(sec_state.get('reason') or '') for k in ['403','Access Denied','recusou o acesso'])
+            if (not sec_state) or stale_blocked or (str(sec_state.get('ticker') or '').upper()!=expected_sec_ticker):
                 with st.spinner('A consultar insiders SEC...'):
                     sec_state=sec_insider_analysis(a.get('xtb_ticker'),a.get('source_ticker'),days=90)
                 st.session_state['v29_analysis_insiders']=sec_state
@@ -4613,9 +4742,7 @@ elif PAGE == 'Analisar':
             st.session_state['v29_analysis_insiders']=sec
         render_sec_insiders(sec,key_prefix='analyze_sec')
         if (not sec.get('available')) and a.get('kind')=='Ação':
-            reason=str(sec.get('reason') or '')
-            if '403' in reason or 'Access Denied' in reason or 'Undeclared Automated Tool' in reason:
-                st.warning('A SEC recusou o pedido automático. Define SEC_USER_AGENT nos Secrets, por exemplo: "Carteira Inteligente teu-email@dominio.pt", e volta a carregar em Atualizar SEC.')
+            st.warning(sec.get('reason') or 'Não foi possível obter dados de insiders para esta ação.')
 
         if st.button('Ver alvos, prazo e histórico',use_container_width=True,key='v14_an_detail'):
             try:
