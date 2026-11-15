@@ -147,6 +147,8 @@ XTB_SOURCE_ALIASES = {
     'ASML.NL':'ASML.AS',
     'ASML.US':'ASML',
     'META.US':'META',
+    'GOOGC.US':'GOOG',
+    '3CP.DE':'3CP.F',
     'FB2A.DE':'FB2A.DE',
     'EDP.PT':'EDP.LS',
     'SAN1.ES':'SAN.MC',
@@ -3436,8 +3438,13 @@ def _report_decision(a, report, holding=False, insiders=None):
         else:
             action='REVER / REDUZIR'
     else:
+        # Nova entrada: três respostas simples. EVITAR fica reservado a casos em que
+        # a qualidade/tese é insuficiente; AGUARDAR significa empresa interessante,
+        # mas preço/timing ainda sem margem de segurança suficiente.
         if fund is not None and fund>=72 and val is not None and val>=58 and tech is not None and tech>=62 and (overall or 0)>=68:
             action='COMPRAR'
+        elif (fund is not None and fund<45) or ((overall or 50)<45 and (fund or 50)<58):
+            action='EVITAR'
         else:
             action='AGUARDAR'
     coverage=float(report.get('coverage_pct') or 0)
@@ -3480,6 +3487,45 @@ def _report_summary_reasons(a, report, decision):
         short,_=_short_action(a,holding=False)
         reasons.append(f'Técnica atual {tech:.0f}/100 - {short}')
     return reasons[:3]
+
+
+def _entry_quality_label(score):
+    score=_safe_float(score)
+    if score is None: return ('N/D','Sem dados suficientes')
+    if score>=75: return ('Forte','Empresa com qualidade fundamental elevada')
+    if score>=60: return ('Boa','Qualidade aceitável, mas com pontos a acompanhar')
+    if score>=45: return ('Mista','Qualidade ainda pouco convincente para nova entrada')
+    return ('Fraca','Fundamentais insuficientes para justificar nova entrada')
+
+
+def _entry_valuation_label(score):
+    score=_safe_float(score)
+    if score is None: return ('N/D','Sem dados suficientes')
+    if score>=70: return ('Atrativa','Preço/valor com margem de segurança interessante')
+    if score>=55: return ('Razoável','Avaliação sem grande desconto, mas aceitável')
+    if score>=40: return ('Exigente','O mercado já está a pagar bastante pelo crescimento')
+    return ('Cara','Margem de segurança baixa ao preço atual')
+
+
+def _entry_technical_label(score, zone_status=''):
+    score=_safe_float(score)
+    if score is None: return ('N/D','Sem dados suficientes')
+    if score>=70: return ('Favorável','Tendência e momentum apoiam a entrada')
+    if score>=55: return ('Neutro','Timing aceitável, mas ainda sem confirmação forte')
+    if score>=40: return ('Fraco','Timing técnico pede paciência')
+    return ('Desfavorável','Técnica atual aumenta o risco de entrada')
+
+
+def _entry_verdict(decision, holding=False):
+    action=str((decision or {}).get('action') or 'N/D')
+    if holding:
+        if action=='REFORÇAR': return ('SIM','A posição reúne condições para reforço, sem garantia de retorno.')
+        if action=='MANTER': return ('NÃO É NECESSÁRIO','A tese justifica manutenção, mas não há sinal forte de reforço.')
+        if 'VENDER' in action or 'REDUZIR' in action: return ('NÃO','A prioridade é rever/reduzir a exposição, não reforçar.')
+        return ('REVER','Há sinais mistos; convém rever antes de aumentar a posição.')
+    if action=='COMPRAR': return ('SIM','Qualidade, avaliação e técnica estão suficientemente alinhadas para considerar uma entrada.')
+    if action=='EVITAR': return ('NÃO','A qualidade/risco não compensa uma nova entrada neste momento.')
+    return ('AINDA NÃO','A empresa pode ser interessante, mas preço e/ou timing ainda não oferecem margem suficiente.')
 
 
 def _report_date_obj(value):
@@ -3544,8 +3590,10 @@ def build_report_analysis_from_report(report):
     a=analyze_asset(xtb,detailed=False,instrument_type='Ação')
     a=_analysis_with_report(a,report)
     holding=_portfolio_holds_ticker(xtb,a.get('source_ticker'))
-    insiders=sec_insider_analysis(a.get('xtb_ticker'),a.get('source_ticker'),days=90) if a.get('kind')=='Ação' else {'available':False,'reason':'Insiders SEC não aplicáveis a este tipo de instrumento.','transactions':[]}
-    decision=_report_decision(a,report,holding,insiders=insiders)
+    # A decisão principal não espera pela SEC. Insiders são uma camada opcional de
+    # confirmação e podem ser carregados depois, evitando bloquear a experiência móvel.
+    insiders={'available':False,'reason':'Carrega apenas se quiseres confirmar o contexto dos insiders.','transactions':[],'lazy':True}
+    decision=_report_decision(a,report,holding,insiders=None)
     valuation=valuation_scenarios(a)
     zone=entry_zone(a,valuation)
     return {'report':report,'analysis':a,'decision':decision,'holding':holding,'valuation':valuation,'zone':zone,'insiders':insiders}
@@ -3957,8 +4005,17 @@ def _comparison_metric_card(label, ticker, note=''):
     if note:
         st.caption(note)
 
-st.caption('Modo simples: decisão prática primeiro, 3 evidências interpretadas e detalhe apenas quando pedes.')
-PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Risco', 'Analisar', 'Relatório', 'Comparar'], horizontal=True, label_visibility='collapsed', key='main_page')
+st.caption('Modo simples: a app mostra primeiro o que merece atenção e deixa o detalhe para quando o pedes.')
+TOP_PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Descobrir', 'Analisar'], horizontal=True, label_visibility='collapsed', key='main_page_v30')
+PAGE = TOP_PAGE
+if TOP_PAGE == 'Carteira':
+    _carteira_view = st.radio('Carteira', ['Posições', 'Risco e alertas'], horizontal=True, label_visibility='collapsed', key='carteira_view_v30')
+    PAGE = 'Carteira' if _carteira_view == 'Posições' else 'Risco'
+elif TOP_PAGE == 'Descobrir':
+    PAGE = 'Comparar'
+elif TOP_PAGE == 'Analisar':
+    _analysis_view = st.radio('Analisar', ['Entrada com relatório', 'Ticker manual'], horizontal=True, label_visibility='collapsed', key='analysis_view_v30')
+    PAGE = 'Relatório' if _analysis_view == 'Entrada com relatório' else 'Analisar'
 
 if PAGE == 'Hoje':
     st.subheader('Dashboard de oportunidades')
@@ -4216,14 +4273,20 @@ A configuração antiga com `APP_PASSWORD` + `PORTFOLIO_OWNER_ID` continua compa
         prow=st.session_state.get('v14_portfolio_rows',[])
         if prow:
             good=[r for r in prow if '_analysis' in r]
+            bad=[r for r in prow if isinstance(r,dict) and r.get('Erro')]
             if good:
                 attention=sum(1 for r in good if any(x in str(r['Decisão principal']).upper() for x in ['REVER','REDUZIR','ALVO']))
                 pnl_vals=[_safe_float(r.get('P/L EUR aprox.')) for r in good]
                 pnl_total=sum(x for x in pnl_vals if x is not None)
+                total_positions=len(st.session_state.get('portfolio_input',[]) or prow)
                 k1,k2,k3=st.columns(3)
-                k1.metric('Posições',len(good))
+                k1.metric('Posições',total_positions)
                 k2.metric('Atenção',attention)
                 k3.metric('P/L aprox.',f'€{pnl_total:,.0f}')
+                if bad:
+                    st.caption(f'{len(good)} de {total_positions} posições com dados de mercado analisáveis neste momento.')
+                    with st.expander(f'⚠️ Posições sem dados de mercado ({len(bad)})'):
+                        st.dataframe(pd.DataFrame([{'Ticker XTB':x.get('Ticker XTB'),'Estado':'Dados de mercado indisponíveis','Detalhe':x.get('Erro')} for x in bad]),hide_index=True,use_container_width=True)
 
                 health=_portfolio_health_report(good)
                 st.markdown('### Radar da carteira')
@@ -4346,7 +4409,11 @@ elif PAGE == 'Risco':
 
         rows=st.session_state.get('v14_portfolio_rows',[])
         good=[r for r in rows if isinstance(r,dict) and r.get('_analysis')]
+        bad=[r for r in rows if isinstance(r,dict) and r.get('Erro')]
         if good:
+            total_positions=len(st.session_state.get('portfolio_input',[]) or rows)
+            if bad:
+                st.caption(f'Radar calculado com {len(good)} de {total_positions} posições; {len(bad)} sem dados de mercado não entram nos scores, mas continuam contabilizadas na carteira.')
             health=_portfolio_health_report(good)
             r1,r2,r3,r4=st.columns(4)
             r1.metric('Saúde da carteira',f"{health['score']:.0f}/100" if health.get('score') is not None else 'N/D',health.get('label',''))
@@ -4418,13 +4485,13 @@ elif PAGE == 'Risco':
 
 
 elif PAGE == 'Relatório':
-    st.subheader('Analisar relatório')
-    st.caption('Carrega um relatório InvestingPro em PDF. A app usa o PDF para fundamentais/avaliação e recalcula a técnica com preços atuais.')
+    st.subheader('Validar entrada com relatório InvestingPro')
+    st.caption('Objetivo: responder se a empresa é boa e se o preço atual oferece uma entrada interessante. O PDF sustenta os fundamentais; o mercado atual decide o timing.')
     if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
         load_persistent_state()
 
-    st.markdown('### 📄 Selecionar relatório')
-    st.caption('Seleciona o PDF mais recente do InvestingPro. A análise começa automaticamente - não precisas de indicar ticker, empresa ou data.')
+    st.markdown('### 📄 Carrega o relatório mais recente')
+    st.caption('Seleciona o PDF do InvestingPro. A app identifica a empresa, atualiza o preço e mostra a decisão sem passos adicionais.')
     report_file=st.file_uploader('Relatório InvestingPro (PDF)',type=['pdf'],key='report_pdf_upload',label_visibility='collapsed')
 
     if report_file is not None:
@@ -4482,15 +4549,7 @@ elif PAGE == 'Relatório':
 
     rr=st.session_state.get('report_result')
     if rr:
-        report=rr['report']; a=rr['analysis']; dec=rr['decision']; holding=rr['holding']; val=rr['valuation']; zone=rr['zone']; insiders=rr.get('insiders') or {'available':False,'reason':'Dados SEC indisponíveis.','transactions':[]}
-        if a.get('kind')=='Ação':
-            expected_sec_ticker=_sec_source_symbol(a.get('source_ticker'))
-            if (not insiders) or (str(insiders.get('ticker') or '').upper()!=expected_sec_ticker):
-                insiders=sec_insider_analysis(a.get('xtb_ticker'),a.get('source_ticker'),days=90)
-                rr['insiders']=insiders
-                rr['decision']=_report_decision(a,report,holding,insiders=insiders)
-                dec=rr['decision']
-                st.session_state['report_result']=rr
+        report=rr['report']; a=rr['analysis']; dec=rr['decision']; holding=rr['holding']; val=rr['valuation']; zone=rr['zone']; insiders=rr.get('insiders') or {'available':False,'reason':'Insiders ainda não carregados.','transactions':[],'lazy':True}
         st.markdown(f"## {a['xtb_ticker']} · {report.get('company') or a['company']}")
         st.caption(f"PDF: {st.session_state.get('report_file_name','')} · relatório {report.get('report_date') or 'data N/D'} · técnica atual até {a['df'].index[-1].date()}")
         import_status=st.session_state.get('report_import_status')
@@ -4519,7 +4578,21 @@ elif PAGE == 'Relatório':
         else:
             st.info(f"**Decisão para nova entrada: {action}** · qualidade/cobertura da análise {dec['confidence_label']} ({dec['confidence']:.0f}%).")
 
-        st.caption('A percentagem acima mede cobertura/qualidade dos dados usados; não é probabilidade de retorno nem de acerto da decisão.')
+        verdict,verdict_note=_entry_verdict(dec,holding=holding)
+        q_label,q_note=_entry_quality_label(dec.get('fundamental'))
+        v_label,v_note=_entry_valuation_label(dec.get('valuation'))
+        t_label,t_note=_entry_technical_label(dec.get('technical'),zone.get('status'))
+        st.markdown('### Vale a pena entrar agora?')
+        e1,e2,e3,e4=st.columns(4)
+        e1.metric('Reforçar agora?' if holding else 'Nova entrada?',verdict)
+        e2.metric('Empresa',q_label)
+        e3.metric('Preço / valor',v_label)
+        e4.metric('Timing',t_label)
+        st.write(verdict_note)
+        current=float(a['row']['Close'])
+        st.caption(f"Preço analisado: {current:.2f} {a['currency']} · zona técnica de referência: {zone['low']:.2f}-{zone['high']:.2f} {a['currency']} · {zone['status']}")
+
+        st.caption('A confiança mede cobertura/qualidade dos dados; não é probabilidade de retorno nem de acerto da decisão.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('Fundamental',_fmt_num(dec.get('fundamental'),0,'/100'))
@@ -4535,7 +4608,6 @@ elif PAGE == 'Relatório':
         st.markdown('### Resumo')
         for reason in reasons:
             st.write('• '+reason)
-        current=float(a['row']['Close'])
         fair=_safe_float(report.get('fair_value')); target=_safe_float(report.get('analyst_avg'))
         if fair:
             st.write(f"• Fair Value do PDF: **{fair:.2f} {a['currency']}** ({(fair/current-1)*100:+.1f}% vs preço atual da análise).")
@@ -4544,8 +4616,11 @@ elif PAGE == 'Relatório':
         st.write(f"• Zona técnica potencial: **{zone['low']:.2f}-{zone['high']:.2f} {a['currency']}** · {zone['status']}.")
 
         if action in ['AGUARDAR','MANTER']:
-            st.markdown('**O que faria melhorar a decisão**')
+            st.markdown('**O que falta para avançar**' if action=='AGUARDAR' else '**O que faria justificar um reforço**')
             st.write('Melhoria do timing técnico e/ou maior margem de segurança na avaliação, mantendo crescimento, margens e balanço sólidos.')
+        elif action=='EVITAR':
+            st.markdown('**Porque não é uma entrada prioritária**')
+            st.write('A qualidade fundamental e/ou a relação risco-preço ainda não justificam uma nova posição. Reavaliar apenas se a tese ou a avaliação melhorar de forma material.')
         elif action=='COMPRAR':
             st.markdown('**O que invalidaria a compra**')
             st.write('Deterioração material dos fundamentais, quebra da tendência de longo prazo ou perda da margem de segurança que sustentou a entrada.')
@@ -4607,7 +4682,18 @@ elif PAGE == 'Relatório':
             st.caption('A técnica do PDF é apenas referência histórica. A decisão usa a técnica recalculada com preços atuais.')
 
         with ti:
-            render_sec_insiders(insiders,key_prefix='report_sec')
+            if insiders.get('lazy') or (not insiders.get('available') and 'Carrega apenas' in str(insiders.get('reason') or '')):
+                st.caption('Opcional. Os insiders não bloqueiam a decisão principal; usa-os apenas como camada de confirmação.')
+                if st.button('Carregar insiders SEC',use_container_width=True,key='report_sec_load_v30'):
+                    with st.spinner('A consultar insiders...'):
+                        loaded=sec_insider_analysis(a.get('xtb_ticker'),a.get('source_ticker'),days=90) if a.get('kind')=='Ação' else {'available':False,'reason':'Insiders não aplicáveis a este instrumento.','transactions':[]}
+                    rr['insiders']=loaded
+                    rr['decision']=_report_decision(a,report,holding,insiders=loaded)
+                    st.session_state['report_result']=rr
+                    st.rerun()
+                st.info('Ainda não carregado. A decisão acima usa PDF + fundamentais + avaliação + técnica atual.')
+            else:
+                render_sec_insiders(insiders,key_prefix='report_sec')
 
         with tr:
             st.caption('Leitura automática em português. Números, percentagens e siglas financeiras são preservados; o texto original fica disponível para conferência.')
@@ -4646,8 +4732,8 @@ elif PAGE == 'Relatório':
 
 
 elif PAGE == 'Comparar':
-    st.subheader('Comparador de ações')
-    st.caption('Compara 2 a 4 ações lado a lado. Primeiro a conclusão; depois os números que a justificam.')
+    st.subheader('Descobrir e comparar')
+    st.caption('Compara candidatos antes de comprar. Usa esta área para escolher qual merece uma análise de entrada mais profunda.')
 
     # Carrega também o cache InvestingPro persistido, mas apenas quando o utilizador
     # entra no comparador; não volta a atrasar o arranque global da app.
