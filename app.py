@@ -310,7 +310,12 @@ def _supabase_headers():
         headers['Authorization']=f'Bearer {key}'
     return headers
 
-def _supabase_request(method, path, payload=None, extra_headers=None, timeout=4):
+def _supabase_request(method, path, payload=None, extra_headers=None, timeout=6, retries=3):
+    """Pedido REST ao Supabase com pequenas tentativas automáticas.
+
+    O Streamlit Community Cloud pode ter falhas transitórias de DNS/rede. Não
+    devemos transformar uma falha de segundos numa carteira aparentemente vazia.
+    """
     url,_,_=persistence_config()
     if not url:
         raise RuntimeError('SUPABASE_URL não configurado.')
@@ -318,18 +323,29 @@ def _supabase_request(method, path, payload=None, extra_headers=None, timeout=4)
     if payload is not None:
         data=json.dumps(_json_safe(payload),ensure_ascii=False,allow_nan=False).encode('utf-8')
     headers=_supabase_headers()
+    headers['Connection']='close'
     if extra_headers:
         headers.update(extra_headers)
-    req=urllib.request.Request(url+path,data=data,headers=headers,method=method)
-    try:
-        with urllib.request.urlopen(req,timeout=timeout) as resp:
-            raw=resp.read().decode('utf-8')
-            return json.loads(raw) if raw.strip() else None
-    except urllib.error.HTTPError as e:
-        detail=e.read().decode('utf-8',errors='replace')
-        raise RuntimeError(f'Erro Supabase HTTP {e.code}: {detail[:300]}') from e
-    except Exception as e:
-        raise RuntimeError(f'Falha de ligação ao armazenamento: {e}') from e
+
+    last_error=None
+    for attempt in range(max(int(retries),1)):
+        req=urllib.request.Request(url+path,data=data,headers=headers,method=method)
+        try:
+            with urllib.request.urlopen(req,timeout=timeout) as resp:
+                raw=resp.read().decode('utf-8')
+                return json.loads(raw) if raw.strip() else None
+        except urllib.error.HTTPError as e:
+            detail=e.read().decode('utf-8',errors='replace')
+            # 429 e 5xx podem ser transitórios; 4xx de configuração não ganham
+            # nada em ser repetidos várias vezes.
+            last_error=RuntimeError(f'Erro Supabase HTTP {e.code}: {detail[:300]}')
+            if e.code not in (429,500,502,503,504):
+                raise last_error from e
+        except Exception as e:
+            last_error=RuntimeError(f'Falha de ligação ao armazenamento: {e}')
+        if attempt < max(int(retries),1)-1:
+            time.sleep(0.5*(attempt+1))
+    raise last_error or RuntimeError('Falha de ligação ao armazenamento.')
 
 def persistent_state_payload():
     return {
@@ -345,6 +361,14 @@ def persistent_state_payload():
 def save_persistent_state(show_error=False):
     if not persistence_enabled():
         st.session_state['persistence_status']='Apenas sessão'
+        return False
+    # Proteção contra perda de dados: se a app arrancou sem conseguir ler o
+    # estado remoto, não deve gravar uma carteira vazia por cima da existente.
+    if st.session_state.get('_persistence_read_ok') is False:
+        st.session_state['persistence_status']='Erro'
+        st.session_state['persistence_error']='Gravação bloqueada: a carteira permanente ainda não foi carregada com sucesso.'
+        if show_error:
+            st.error('Gravação bloqueada por segurança. Primeiro tenta **Recarregar dados guardados**.')
         return False
     _,_,owner=persistence_config()
     payload={
@@ -372,11 +396,12 @@ def save_persistent_state(show_error=False):
 
 def load_persistent_state(force=False):
     if st.session_state.get('_persistent_loaded') and not force:
-        return
-    st.session_state['_persistent_loaded']=True
+        return True
     if not persistence_enabled():
+        st.session_state['_persistent_loaded']=True
+        st.session_state['_persistence_read_ok']=None
         st.session_state['persistence_status']='Apenas sessão'
-        return
+        return False
     _,_,owner=persistence_config()
     q=urllib.parse.quote(owner,safe='')
     try:
@@ -392,7 +417,7 @@ def load_persistent_state(force=False):
             st.session_state.report_library=dict(state.get('report_library') or {})
             st.session_state['persistence_last_save']=rows[0].get('updated_at')
         else:
-            # Um owner_id novo começa sempre vazio; nunca reutiliza dados de outro login.
+            # Só assumimos carteira vazia depois de uma leitura REMOTA bem sucedida.
             st.session_state.portfolio_input=[]
             st.session_state.decision_history=[]
             st.session_state.watchlist=[]
@@ -400,11 +425,19 @@ def load_persistent_state(force=False):
             st.session_state.investingpro_data={}
             st.session_state.investingpro_import_meta={}
             st.session_state.report_library={}
+        st.session_state['_persistent_loaded']=True
+        st.session_state['_persistence_read_ok']=True
         st.session_state['persistence_status']='Ligado'
         st.session_state.pop('persistence_error',None)
+        return True
     except Exception as e:
+        # Não marcamos a persistência como carregada: o utilizador pode tentar
+        # novamente sem reiniciar. E, sobretudo, não limpamos a carteira local.
+        st.session_state['_persistent_loaded']=False
+        st.session_state['_persistence_read_ok']=False
         st.session_state['persistence_status']='Erro'
         st.session_state['persistence_error']=str(e)
+        return False
 
 # A persistencia deixa de ser carregada no arranque global.
 # E carregada apenas quando o utilizador abre a pagina Carteira, evitando bloquear a abertura da app.
@@ -4154,7 +4187,8 @@ elif PAGE == 'Carteira':
         msg='Dados permanentes: **Ligado**' + (f' · última gravação {last}' if last else '')
         st.success(msg)
     elif status=='Erro':
-        st.error('Dados permanentes: erro de ligação. A sessão continua a funcionar, mas as alterações podem não sobreviver a um reinício.')
+        st.error('Não foi possível carregar a carteira guardada. **Os dados remotos não foram substituídos.**')
+        st.caption('A app mantém a gravação bloqueada até conseguir ler o Supabase, para evitar gravar uma carteira vazia por engano.')
         with st.expander('Ver erro de armazenamento'):
             st.code(st.session_state.get('persistence_error','Erro desconhecido'))
     else:
@@ -4186,15 +4220,19 @@ A configuração antiga com `APP_PASSWORD` + `PORTFOLIO_OWNER_ID` continua compa
 ''')
 
     cstore1,cstore2=st.columns(2)
+    read_ok=st.session_state.get('_persistence_read_ok')
     with cstore1:
-        if st.button('Guardar carteira agora',use_container_width=True,key='persist_save_now'):
+        if st.button('Guardar carteira agora',use_container_width=True,key='persist_save_now',disabled=(persistence_enabled() and read_ok is False)):
             if save_persistent_state(show_error=True):
                 st.success('Carteira e histórico guardados permanentemente.')
     with cstore2:
-        if st.button('Recarregar dados guardados',use_container_width=True,key='persist_reload_now',disabled=not persistence_enabled()):
-            load_persistent_state(force=True)
-            st.success('Dados permanentes recarregados.')
-            st.rerun()
+        if st.button('Tentar carregar novamente',use_container_width=True,key='persist_reload_now',disabled=not persistence_enabled()):
+            ok=load_persistent_state(force=True)
+            if ok:
+                st.success('Carteira guardada recuperada com sucesso.')
+                st.rerun()
+            else:
+                st.error('A ligação continua indisponível. A app não gravou nem apagou a carteira remota.')
 
     st.caption('A pergunta principal aqui é simples: manter, reforçar, aguardar ou rever?')
 
@@ -4354,7 +4392,10 @@ A configuração antiga com `APP_PASSWORD` + `PORTFOLIO_OWNER_ID` continua compa
         else:
             st.info('Carrega em **Atualizar carteira** para ver as decisões atuais.')
     else:
-        st.info('Ainda não tens posições registadas.')
+        if persistence_enabled() and st.session_state.get('_persistence_read_ok') is False:
+            st.warning('A carteira não está vazia: **a app ainda não conseguiu carregar os dados permanentes**. Usa “Tentar carregar novamente”.')
+        else:
+            st.info('Ainda não tens posições registadas.')
 
     if st.session_state.decision_history:
         with st.expander('Decisões rejeitadas / aceites'):
