@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title='Carteira Inteligente', page_icon='📊', layout='wide')
+st.set_page_config(page_title='Carteira Inteligente', page_icon='📊', layout='wide', initial_sidebar_state='collapsed')
 
 # -----------------------------------------------------------------------------
 # Autenticação multiutilizador
@@ -113,9 +113,9 @@ if st.session_state.get('_app_authenticated'):
         st.rerun()
 
 st.markdown('''
-<div class="ci-header">
-  <div class="ci-brand"><span class="ci-mark">▮▮▮</span><span>Carteira<br>Inteligente</span></div>
-  <div class="ci-user">''' + html.escape(str(st.session_state.get('_user_display') or '')) + '''</div>
+<div class="sy-topbar">
+  <div class="sy-wordmark"><span class="sy-mark">▰</span><span>Carteira Inteligente</span></div>
+  <div class="sy-account">''' + html.escape(str(st.session_state.get('_user_display') or '')) + '''</div>
 </div>
 ''', unsafe_allow_html=True)
 
@@ -2280,6 +2280,16 @@ def _portfolio_quick_row(r):
     if pa>0 and price>=pa:
         primary='ALVO PESSOAL ATINGIDO - REVER'
     movement_pct=(price/pm-1)*100
+    day_pct=None; day_eur=None
+    try:
+        if len(a.get('df',[]))>=2:
+            _last=float(a['df']['Close'].iloc[-1]); _prev=float(a['df']['Close'].iloc[-2])
+            if _prev>0:
+                day_pct=(_last/_prev-1.0)*100.0
+            if a.get('kind')!='CFD':
+                day_eur=to_eur((_last-_prev)*q,cur)
+    except Exception:
+        pass
     multiplier=_safe_float(r.get('Multiplicador contrato')) or 0.0
     if a.get('kind')=='CFD':
         pnl_pct=None
@@ -2297,6 +2307,7 @@ def _portfolio_quick_row(r):
         'Preço atual':price,'Moeda':cur,'Quantidade':q,'Preço médio':pm,
         'Valor atual EUR':current_value_eur,'Notional CFD EUR aprox.':cfd_notional_eur,
         'P/L %':pnl_pct,'Movimento subjacente %':movement_pct,'P/L EUR aprox.':pnl_eur,
+        'Variação dia %':day_pct,'Variação dia EUR':day_eur,
         'Multiplicador contrato':multiplier if multiplier>0 else None,
         'Decisão principal':primary,'Curto prazo':short_action,'Score curto':short_score,
         'Longo prazo':long_action,'Score longo':long_score,'Resumo':' · '.join(ev),
@@ -3793,41 +3804,59 @@ def decision_performance_standardized():
 
 
 # -----------------------------------------------------------------------------
-# Interface mobile-first (v31)
+# Interface Sharpyield-like (v32) - Streamlit, mobile-first
 # -----------------------------------------------------------------------------
 st.markdown('''
 <style>
-:root {--ci-navy:#0b1b3a;--ci-blue:#1d4ed8;--ci-green:#16a34a;--ci-orange:#ea7c16;--ci-red:#dc2626;--ci-muted:#6b7280;--ci-border:#e7eaf0;--ci-bg:#f7f9fc;}
-html, body, [data-testid="stAppViewContainer"] {background:#fff;}
-.block-container {padding-top:.55rem; padding-bottom:5.8rem; max-width:1240px;}
-[data-testid="stSidebar"] {background:#fbfcfe; border-right:1px solid var(--ci-border);}
-#MainMenu, footer {visibility:hidden;}
-.ci-header{display:flex;align-items:center;justify-content:space-between;padding:.35rem .15rem .8rem;border-bottom:1px solid var(--ci-border);margin-bottom:.8rem;}
-.ci-brand{display:flex;gap:.65rem;align-items:center;font-size:1.05rem;font-weight:800;line-height:.9;color:var(--ci-navy);}
-.ci-mark{letter-spacing:-3px;color:var(--ci-green);font-size:1.4rem;transform:rotate(-2deg);}
-.ci-user{font-size:.85rem;color:var(--ci-muted);}
-.ci-title{font-size:2.05rem;font-weight:850;letter-spacing:-.035em;color:var(--ci-navy);line-height:1.05;margin:.25rem 0 .2rem;}
-.ci-subtitle{color:#4b5563;font-size:.95rem;margin-bottom:1rem;}
-.ci-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.8rem;margin:.7rem 0 1rem;}
-.ci-kpi{background:white;border:1px solid var(--ci-border);box-shadow:0 4px 16px rgba(15,23,42,.045);border-radius:18px;padding:1rem 1.05rem;min-height:108px;}
-.ci-kpi-label{font-size:.82rem;color:#4b5563;margin-bottom:.35rem;}.ci-kpi-value{font-size:1.65rem;font-weight:850;color:var(--ci-navy);letter-spacing:-.025em;}.ci-kpi-delta{display:inline-block;margin-top:.32rem;padding:.18rem .45rem;border-radius:999px;background:#eaf8ee;color:#15803d;font-weight:700;font-size:.78rem;}.ci-kpi-note{margin-top:.28rem;color:#6b7280;font-size:.78rem;}
-.ci-panel{background:#fff;border:1px solid var(--ci-border);border-radius:18px;padding:1rem 1.05rem;margin:.8rem 0;box-shadow:0 4px 16px rgba(15,23,42,.035);}
-.ci-panel-title{font-size:1.05rem;font-weight:800;color:var(--ci-navy);margin-bottom:.7rem;}.ci-attn{background:linear-gradient(135deg,#f5fff8,#fbfffc);border-color:#d9f2df;}.ci-attn-row{display:grid;grid-template-columns:90px 1fr auto;gap:.6rem;align-items:center;padding:.55rem 0;border-top:1px solid #edf3ee;}.ci-attn-row:first-of-type{border-top:0}.ci-ticker{font-weight:850;color:var(--ci-navy)}.ci-muted{color:#6b7280;font-size:.84rem}.ci-pill{display:inline-block;padding:.23rem .55rem;border-radius:999px;font-size:.76rem;font-weight:800}.ci-pill.green{background:#e9f8ed;color:#15803d}.ci-pill.blue{background:#eaf2ff;color:#1d4ed8}.ci-pill.orange{background:#fff1df;color:#c76607}.ci-pill.red{background:#feecec;color:#c81e1e}.ci-pill.gray{background:#f0f2f5;color:#667085}
-.ci-position{display:grid;grid-template-columns:minmax(130px,1.5fr) .7fr .8fr .8fr .7fr;gap:.7rem;align-items:center;padding:.72rem .1rem;border-top:1px solid #eef0f4;font-size:.88rem}.ci-position:first-of-type{border-top:0}.ci-company{font-size:.76rem;color:#6b7280}.ci-pos-main{font-weight:800;color:var(--ci-navy)}.ci-positive{color:#15803d;font-weight:800}.ci-negative{color:#dc2626;font-weight:800}
-.ci-verdict{border:1px solid #f5d8bb;background:linear-gradient(135deg,#fff9f2,#fffaf5);border-radius:20px;padding:1.05rem 1.15rem;margin:1rem 0}.ci-verdict-action{font-size:1.75rem;font-weight:900;color:#c45b08;letter-spacing:-.02em}.ci-verdict-text{font-size:1rem;color:#273244;margin:.2rem 0 .7rem}.ci-triad{display:grid;grid-template-columns:repeat(3,1fr);gap:.55rem}.ci-mini{background:#fff;border:1px solid #f0e9e2;border-radius:14px;padding:.65rem;text-align:center}.ci-mini-label{font-size:.72rem;color:#6b7280}.ci-mini-value{font-weight:850;font-size:.95rem;margin-top:.15rem}
-.asset-card {border:1px solid var(--ci-border); border-radius:18px; padding:14px 15px; margin:9px 0; background:#fff;box-shadow:0 4px 16px rgba(15,23,42,.035)}
-.asset-head {display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:7px}.asset-title {font-size:1.02rem;font-weight:800}.asset-sub{color:#6b7280;font-size:.82rem}.asset-action{font-weight:800}.ev{font-size:.88rem}.score{color:#6b7280;font-size:.78rem}.good{color:#16a34a}.wait{color:#d97706}.bad{color:#dc2626}.neutral{color:#64748b}.section-note{color:#6b7280;font-size:.88rem;margin-bottom:.5rem}
-[data-testid="stMetric"]{background:#fff;border:1px solid var(--ci-border);padding:.7rem;border-radius:16px;box-shadow:0 4px 16px rgba(15,23,42,.03)}
-[data-testid="stFileUploader"]{border:1px dashed #c8d2e3;border-radius:18px;padding:.35rem;background:#fafbff}
-.stButton>button[kind="primary"]{border-radius:14px;background:var(--ci-navy);border-color:var(--ci-navy);font-weight:750}.stButton>button{border-radius:14px;min-height:2.8rem}
-/* Main navigation */
-div[role="radiogroup"]{gap:.35rem;background:#f5f7fb;border-radius:16px;padding:.25rem}.stRadio label{padding:.4rem .72rem;border-radius:12px;color:var(--ci-navy)!important}.stRadio label p{color:var(--ci-navy)!important;font-weight:650}
-@media (max-width: 760px){
-  .block-container{padding-left:.78rem;padding-right:.78rem;padding-top:.35rem;padding-bottom:6.5rem}.ci-header{position:sticky;top:0;background:rgba(255,255,255,.95);backdrop-filter:blur(10px);z-index:98;margin-left:-.2rem;margin-right:-.2rem;padding:.55rem .2rem .65rem}.ci-title{font-size:1.8rem}.ci-grid{grid-template-columns:1fr 1fr;gap:.6rem}.ci-kpi{padding:.8rem;min-height:96px}.ci-kpi-value{font-size:1.35rem}.ci-attn-row{grid-template-columns:62px 1fr;}.ci-attn-row .ci-pill{grid-column:2;justify-self:start}.ci-position{grid-template-columns:1.4fr .8fr .8fr;}.ci-position .hide-mobile{display:none}.ci-triad{grid-template-columns:repeat(3,1fr)}
-  div[data-testid="stRadio"]:has(input[value="Hoje"]), div[data-testid="stRadio"]:has(input[value="Carteira"]), div[data-testid="stRadio"]:has(input[value="Descobrir"]), div[data-testid="stRadio"]:has(input[value="Analisar"]){position:fixed;left:.55rem;right:.55rem;bottom:.45rem;z-index:999;background:white;border:1px solid #dde3ee;border-radius:20px;padding:.25rem .35rem;box-shadow:0 10px 30px rgba(15,23,42,.16)}
-  div[data-testid="stRadio"]:has(input[value="Hoje"]) div[role="radiogroup"]{display:grid;grid-template-columns:repeat(4,1fr);background:white;padding:0;gap:.1rem}
-  div[data-testid="stRadio"]:has(input[value="Hoje"]) label{justify-content:center;text-align:center;font-size:.77rem;padding:.55rem .2rem;color:var(--ci-navy)!important} div[data-testid="stRadio"]:has(input[value="Hoje"]) label p{color:var(--ci-navy)!important;font-weight:750}
+:root{
+  --sy-ink:#0c1d3a; --sy-muted:#687386; --sy-green:#18a66a; --sy-green2:#e8f8f0;
+  --sy-red:#d9485f; --sy-orange:#d98019; --sy-blue:#2867d8;
+  --sy-line:#e9edf2; --sy-card:#ffffff; --sy-soft:#f7f8fa; --sy-warm:#fbfaf7;
+  --sy-shadow:0 8px 26px rgba(12,29,58,.055);
 }
+html,body,[data-testid="stAppViewContainer"],.stApp{background:var(--sy-warm)!important;color:var(--sy-ink)!important;}
+header[data-testid="stHeader"]{background:rgba(251,250,247,.94)!important;backdrop-filter:blur(10px);}
+#MainMenu,footer{visibility:hidden;}
+.block-container{max-width:1180px;padding-top:.45rem;padding-bottom:5.5rem;padding-left:220px!important;padding-right:1.15rem!important;}
+.stApp .stMarkdown,.stApp .stMarkdown p,.stApp .stMarkdown li,.stApp [data-testid="stWidgetLabel"] p,
+.stApp .stCaptionContainer p,.stApp label,.stApp [data-testid="stExpander"] summary{color:var(--sy-ink)!important;}
+.stApp input,.stApp textarea{color:var(--sy-ink)!important;background:#fff!important;}
+.stApp [data-baseweb="select"]>div{background:#fff!important;color:var(--sy-ink)!important;border-color:var(--sy-line)!important;}
+.stApp button{font-family:inherit;}.stApp button *{color:inherit!important;}
+.stApp button[kind="primary"]{background:var(--sy-ink)!important;border-color:var(--sy-ink)!important;color:#fff!important;}
+.stApp button[kind="secondary"]{background:#fff!important;border-color:#dce2ea!important;color:var(--sy-ink)!important;}
+[data-testid="stSidebar"]{background:#fff;border-right:1px solid var(--sy-line);}
+.sy-topbar{display:flex;align-items:center;justify-content:space-between;height:54px;margin-bottom:.45rem;border-bottom:1px solid var(--sy-line);}
+.sy-wordmark{display:flex;gap:.55rem;align-items:center;font-weight:850;font-size:1rem;letter-spacing:-.02em;color:var(--sy-ink);}
+.sy-mark{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:9px;background:var(--sy-green);color:white;font-size:.78rem;transform:rotate(-8deg);}
+.sy-account{font-size:.78rem;color:var(--sy-muted);}
+.sy-page-title{font-size:1.72rem;font-weight:860;letter-spacing:-.045em;color:var(--sy-ink);line-height:1.05;margin:.4rem 0 .15rem;}
+.sy-page-sub{color:var(--sy-muted);font-size:.9rem;margin-bottom:.9rem;}
+
+div[data-testid="stRadio"]:has(input[value="Hoje"]){position:fixed;left:16px;top:78px;width:182px;z-index:100;background:#fff;border:1px solid var(--sy-line);border-radius:20px;padding:.55rem;box-shadow:var(--sy-shadow);}
+div[data-testid="stRadio"]:has(input[value="Hoje"]) div[role="radiogroup"]{display:flex;flex-direction:column;gap:.15rem;background:transparent!important;padding:0!important;}
+div[data-testid="stRadio"]:has(input[value="Hoje"]) label{width:100%;padding:.65rem .68rem!important;border-radius:12px;color:var(--sy-ink)!important;}
+div[data-testid="stRadio"]:has(input[value="Hoje"]) label p{font-weight:720!important;font-size:.86rem!important;color:var(--sy-ink)!important;}
+div[data-testid="stRadio"]:has(input[value="Hoje"]) label:has(input:checked){background:#eef8f3!important;}
+div[data-testid="stRadio"]:has(input[value="Hoje"]) label:has(input:checked) p{color:#0d7c4e!important;}
+div[data-testid="stRadio"]:not(:has(input[value="Hoje"])) div[role="radiogroup"]{gap:.25rem;background:#f0f2f5;border-radius:13px;padding:.22rem;}
+div[data-testid="stRadio"]:not(:has(input[value="Hoje"])) label{border-radius:10px;padding:.4rem .65rem;color:var(--sy-ink)!important;}
+div[data-testid="stRadio"]:not(:has(input[value="Hoje"])) label p{color:var(--sy-ink)!important;font-weight:650;}
+
+.sy-hero{background:linear-gradient(145deg,#ffffff,#fbfdfc);border:1px solid var(--sy-line);border-radius:22px;padding:1.15rem 1.2rem;box-shadow:var(--sy-shadow);margin:.45rem 0 .85rem;}
+.sy-hero-top{display:flex;justify-content:space-between;gap:.7rem;align-items:flex-start;}.sy-eyebrow{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;font-weight:800;color:var(--sy-muted);}
+.sy-value{font-size:2.15rem;font-weight:880;letter-spacing:-.055em;color:var(--sy-ink);line-height:1.05;margin:.18rem 0;}.sy-today{display:flex;gap:.45rem;align-items:center;font-weight:800;font-size:.9rem;}.sy-today.pos{color:var(--sy-green)}.sy-today.neg{color:var(--sy-red)}.sy-today.na{color:var(--sy-muted)}
+.sy-live{display:inline-flex;align-items:center;gap:.35rem;padding:.28rem .5rem;border-radius:999px;background:#f3f5f7;color:var(--sy-muted);font-size:.7rem;font-weight:700;white-space:nowrap;}.sy-dot{width:7px;height:7px;border-radius:50%;background:var(--sy-green);display:inline-block;}
+.sy-hero-meta{display:flex;flex-wrap:wrap;gap:.85rem;margin-top:.9rem;padding-top:.8rem;border-top:1px solid var(--sy-line);}.sy-hero-meta>div{min-width:110px}.sy-meta-label{font-size:.7rem;color:var(--sy-muted)}.sy-meta-val{font-size:.92rem;font-weight:800;color:var(--sy-ink);margin-top:.1rem}
+.sy-grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.65rem;margin:.65rem 0 .85rem;}.sy-stat{background:#fff;border:1px solid var(--sy-line);border-radius:17px;padding:.82rem .9rem;box-shadow:0 4px 14px rgba(12,29,58,.03);}.sy-stat-label{font-size:.72rem;color:var(--sy-muted)}.sy-stat-value{font-size:1.12rem;font-weight:850;color:var(--sy-ink);margin-top:.16rem}.sy-stat-note{font-size:.68rem;color:var(--sy-muted);margin-top:.16rem}
+.sy-card{background:#fff;border:1px solid var(--sy-line);border-radius:20px;padding:1rem 1.05rem;box-shadow:var(--sy-shadow);margin:.7rem 0;}.sy-card-head{display:flex;align-items:center;justify-content:space-between;gap:.6rem;margin-bottom:.55rem}.sy-card-title{font-size:.98rem;font-weight:830;color:var(--sy-ink)}.sy-card-sub{font-size:.72rem;color:var(--sy-muted)}
+.sy-pos-row{display:grid;grid-template-columns:minmax(180px,1.55fr) .75fr .72fr .78fr;gap:.55rem;align-items:center;padding:.72rem 0;border-top:1px solid #f0f2f4;}.sy-pos-row:first-child{border-top:0}.sy-asset{display:flex;gap:.62rem;align-items:center;min-width:0}.sy-avatar{width:34px;height:34px;border-radius:11px;background:#eef3f7;color:var(--sy-ink);display:grid;place-items:center;font-size:.68rem;font-weight:900;flex:none}.sy-asset-txt{min-width:0}.sy-ticker{font-weight:850;color:var(--sy-ink);font-size:.88rem}.sy-company{font-size:.72rem;color:var(--sy-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sy-label{font-size:.66rem;color:var(--sy-muted)}.sy-num{font-size:.84rem;font-weight:760;color:var(--sy-ink)}.sy-pos{color:var(--sy-green)!important}.sy-neg{color:var(--sy-red)!important}.sy-na{color:var(--sy-muted)!important}
+.sy-badge{display:inline-block;padding:.24rem .48rem;border-radius:999px;font-size:.68rem;font-weight:800;white-space:nowrap}.sy-badge.green{background:#e7f7ee;color:#118052}.sy-badge.blue{background:#eaf1fd;color:#235cc0}.sy-badge.orange{background:#fff1df;color:#b96308}.sy-badge.red{background:#feecef;color:#bd3048}.sy-badge.gray{background:#f0f2f5;color:#687386}
+.sy-bar-row{margin:.55rem 0}.sy-bar-top{display:flex;justify-content:space-between;font-size:.75rem;color:var(--sy-ink);margin-bottom:.23rem}.sy-track{height:7px;border-radius:99px;background:#edf0f3;overflow:hidden}.sy-fill{height:100%;border-radius:99px;background:var(--sy-ink)}
+.sy-attn{display:flex;gap:.65rem;align-items:flex-start;padding:.62rem 0;border-top:1px solid #f0f2f4}.sy-attn:first-child{border-top:0}.sy-attn-icon{width:28px;height:28px;border-radius:9px;background:#f4f6f8;display:grid;place-items:center;flex:none}.sy-attn-main{flex:1;min-width:0}.sy-attn-title{font-size:.82rem;font-weight:800;color:var(--sy-ink)}.sy-attn-text{font-size:.72rem;color:var(--sy-muted);line-height:1.35;margin-top:.05rem}.sy-empty{padding:1.4rem;text-align:center;background:#fff;border:1px solid var(--sy-line);border-radius:20px;color:var(--sy-muted)}
+.ci-title,.sy-analysis-title{font-size:1.72rem;font-weight:860;letter-spacing:-.04em;color:var(--sy-ink);margin:.35rem 0 .15rem}.ci-subtitle{color:var(--sy-muted);font-size:.9rem;margin-bottom:.9rem}.ci-panel,.asset-card{background:#fff!important;border:1px solid var(--sy-line)!important;border-radius:20px!important;box-shadow:var(--sy-shadow)!important;padding:1rem 1.05rem!important}.ci-panel-title,.asset-title{color:var(--sy-ink)!important}.ci-muted,.asset-sub,.score,.section-note{color:var(--sy-muted)!important}.ci-verdict{border:1px solid #f0dfc9;background:#fffaf3;border-radius:20px;padding:1rem 1.05rem}.ci-verdict-action{font-size:1.65rem;font-weight:900;color:#b96308}.ci-verdict-text{color:#344054}.ci-triad{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem}.ci-mini{background:#fff;border:1px solid #efe7dd;border-radius:14px;padding:.62rem;text-align:center}.ci-mini-label{font-size:.68rem;color:var(--sy-muted)}.ci-mini-value{font-weight:850;color:var(--sy-ink)}
+[data-testid="stMetric"]{background:#fff;border:1px solid var(--sy-line);border-radius:17px;padding:.7rem .8rem;box-shadow:0 4px 14px rgba(12,29,58,.03)}[data-testid="stFileUploader"]{background:#fff;border:1px dashed #cbd3dd;border-radius:18px;padding:.25rem}[data-testid="stExpander"]{background:#fff;border:1px solid var(--sy-line);border-radius:16px!important;overflow:hidden}[data-testid="stDataFrame"]{border:1px solid var(--sy-line);border-radius:15px;overflow:hidden}.stButton>button{border-radius:13px!important;min-height:2.65rem;font-weight:720}
+@media(max-width:760px){.block-container{padding-left:.72rem!important;padding-right:.72rem!important;padding-top:.2rem!important;padding-bottom:6.4rem!important}.sy-topbar{height:48px;position:sticky;top:0;z-index:98;background:rgba(251,250,247,.96);backdrop-filter:blur(9px)}.sy-account{display:none}.sy-page-title,.ci-title{font-size:1.48rem}.sy-value{font-size:1.95rem}.sy-grid-3{grid-template-columns:1fr 1fr}.sy-grid-3 .sy-stat:last-child{grid-column:1/-1}.sy-hero{padding:1rem}.sy-hero-meta{gap:.65rem}.sy-pos-row{grid-template-columns:minmax(150px,1.3fr) .75fr .72fr}.sy-pos-row .sy-hide-mobile{display:none}.ci-triad{grid-template-columns:repeat(3,1fr)}div[data-testid="stRadio"]:has(input[value="Hoje"]){left:.55rem;right:.55rem;top:auto;bottom:.45rem;width:auto;padding:.25rem .32rem;border-radius:19px;box-shadow:0 10px 30px rgba(12,29,58,.17)}div[data-testid="stRadio"]:has(input[value="Hoje"]) div[role="radiogroup"]{display:grid;grid-template-columns:repeat(4,1fr);gap:.05rem}div[data-testid="stRadio"]:has(input[value="Hoje"]) label{padding:.48rem .12rem!important;justify-content:center;text-align:center}div[data-testid="stRadio"]:has(input[value="Hoje"]) label p{font-size:.7rem!important;white-space:nowrap}}
 </style>
 ''', unsafe_allow_html=True)
 
@@ -4087,8 +4116,7 @@ def _v31_decision_bucket(action):
 def _v31_store_snapshot(rows):
     clean=[]
     for r in rows or []:
-        if not isinstance(r,dict):
-            continue
+        if not isinstance(r,dict): continue
         clean.append({k:_json_safe(v) for k,v in r.items() if k!='_analysis'})
     st.session_state['portfolio_snapshot']=clean
     st.session_state['portfolio_snapshot_updated_at']=datetime.now(timezone.utc).isoformat()
@@ -4098,147 +4126,154 @@ def _v31_rows():
     rows=st.session_state.get('v14_portfolio_rows') or st.session_state.get('portfolio_rows') or []
     return [r for r in rows if isinstance(r,dict)]
 
+def _v32_initials(ticker, company=''):
+    base=re.sub(r'[^A-Za-z0-9]','',str(ticker).split('.')[0])
+    return (base[:3] or str(company)[:2] or '?').upper()
+
+def _v32_updated_label():
+    raw=st.session_state.get('portfolio_snapshot_updated_at')
+    if not raw: return 'Sem atualização guardada'
+    try:
+        dt=datetime.fromisoformat(str(raw).replace('Z','+00:00'))
+        return 'Atualizado ' + dt.strftime('%d/%m · %H:%M UTC')
+    except Exception:
+        return 'Último snapshot guardado'
+
 def _v31_portfolio_stats(rows):
-    vals=[_safe_float(r.get('Valor atual EUR')) for r in rows]
-    vals=[x for x in vals if x is not None]
-    pnl=[_safe_float(r.get('P/L EUR aprox.')) for r in rows]
-    pnl=[x for x in pnl if x is not None]
-    total=sum(vals) if vals else None
-    pnl_total=sum(pnl) if pnl else None
+    vals=[_safe_float(r.get('Valor atual EUR')) for r in rows]; vals=[x for x in vals if x is not None]
+    pnl=[_safe_float(r.get('P/L EUR aprox.')) for r in rows]; pnl=[x for x in pnl if x is not None]
+    total=sum(vals) if vals else None; pnl_total=sum(pnl) if pnl else None
     cost=(total-pnl_total) if total is not None and pnl_total is not None else None
     ret=(pnl_total/cost*100) if cost and cost>0 else None
-    day_eur=0.0; day_ok=False
-    dividends=0.0; div_ok=False
+    day_vals=[_safe_float(r.get('Variação dia EUR')) for r in rows]; day_vals=[x for x in day_vals if x is not None]
+    day_eur=sum(day_vals) if day_vals else None
+    day_pct=(day_eur/(total-day_eur)*100) if day_eur is not None and total is not None and (total-day_eur)>0 else None
+    return {'total':total,'pnl':pnl_total,'return_pct':ret,'day_eur':day_eur,'day_pct':day_pct,'dividends':None}
+
+def _v32_sector_weights(rows):
+    total=sum((_safe_float(r.get('Valor atual EUR')) or 0) for r in rows if str(r.get('Tipo instrumento') or '')!='CFD')
+    if total<=0: return []
+    agg={}
     for r in rows:
-        a=r.get('_analysis')
-        q=_safe_float(r.get('Quantidade')) or 0
-        if not a or q<=0 or r.get('Tipo instrumento')=='CFD': continue
+        if str(r.get('Tipo instrumento') or '')=='CFD': continue
+        v=_safe_float(r.get('Valor atual EUR')) or 0; sec=str(r.get('Setor') or 'Sem classificação').strip() or 'Sem classificação'
+        agg[sec]=agg.get(sec,0)+v
+    return sorted([(k,v/total*100) for k,v in agg.items()],key=lambda x:x[1],reverse=True)
+
+def _v32_positions_html(rows, limit=None, show_status=True):
+    good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]
+    total=sum((_safe_float(r.get('Valor atual EUR')) or 0) for r in good if str(r.get('Tipo instrumento') or '')!='CFD')
+    good=sorted(good,key=lambda r:_safe_float(r.get('Valor atual EUR')) or 0,reverse=True)
+    if limit: good=good[:limit]
+    chunks=[]
+    for r in good:
+        ticker=html.escape(str(r.get('Ticker XTB') or '')); company=html.escape(str(r.get('Empresa') or r.get('Tipo instrumento') or ''))
+        q=_safe_float(r.get('Quantidade')) or 0; price=_safe_float(r.get('Preço atual')); cur=html.escape(str(r.get('Moeda') or ''))
+        day=_safe_float(r.get('Variação dia %')); pnl=_safe_float(r.get('P/L EUR aprox.')); pnlpct=_safe_float(r.get('P/L %'))
+        bucket,color=_v31_decision_bucket(r.get('Decisão principal')); cls='sy-pos' if (pnl or 0)>=0 else 'sy-neg'; dcls='sy-pos' if (day or 0)>=0 else 'sy-neg'
+        weight=((_safe_float(r.get('Valor atual EUR')) or 0)/total*100) if total>0 and str(r.get('Tipo instrumento') or '')!='CFD' else None
+        badge=f'<span class="sy-badge {color}">{html.escape(bucket)}</span>' if show_status else ''
+        chunks.append(f'''<div class="sy-pos-row"><div class="sy-asset"><div class="sy-avatar">{_v32_initials(ticker,company)}</div><div class="sy-asset-txt"><div class="sy-ticker">{ticker}</div><div class="sy-company">{company} · {q:g} un.</div></div></div><div><div class="sy-label">Preço</div><div class="sy-num">{(f'{price:.2f} {cur}' if price is not None else 'N/D')}</div><div class="sy-label {dcls}">{_v31_pct(day)}</div></div><div><div class="sy-label">Resultado</div><div class="sy-num {cls}">{_v31_money(pnl)}</div><div class="sy-label {cls}">{_v31_pct(pnlpct)}</div></div><div class="sy-hide-mobile"><div class="sy-label">Peso</div><div class="sy-num">{(f'{weight:.1f}%' if weight is not None else 'N/D')}</div><div style="margin-top:.2rem">{badge}</div></div></div>''')
+    return ''.join(chunks)
+
+def _v32_attention_html(rows, limit=4):
+    items=[]; priority={'Rever':0,'Reforçar':1,'Aguardar':2,'Manter':3,'Acompanhar':4}
+    for r in rows:
+        if not isinstance(r,dict) or r.get('Erro'): continue
+        bucket,color=_v31_decision_bucket(r.get('Decisão principal')); items.append((priority.get(bucket,4),r,bucket,color))
+    items.sort(key=lambda x:x[0]); out=[]
+    for _,r,bucket,color in items[:limit]:
+        ticker=html.escape(str(r.get('Ticker XTB') or '')); msg=html.escape(str(r.get('Decisão principal') or 'Acompanhar'))
+        out.append(f'''<div class="sy-attn"><div class="sy-attn-icon">◎</div><div class="sy-attn-main"><div class="sy-attn-title">{ticker} <span class="sy-badge {color}">{bucket}</span></div><div class="sy-attn-text">{msg}</div></div></div>''')
+    return ''.join(out) or '<div class="sy-attn-text">Sem alertas relevantes no último snapshot.</div>'
+
+def _v32_refresh_portfolio():
+    inputs=st.session_state.get('portfolio_input',[]) or []
+    if not inputs: st.warning('Ainda não existem posições para atualizar.'); return
+    out=[]; prog=st.progress(0,text='A atualizar posições...')
+    for i,r in enumerate(inputs,1):
         try:
-            df=a.get('df')
-            if df is not None and len(df)>=2:
-                d=float(df['Close'].iloc[-1]-df['Close'].iloc[-2])*q
-                de=to_eur(d,a.get('currency'))
-                if de is not None:
-                    day_eur += de; day_ok=True
-            rate=_num(a.get('info') or {},'dividendRate')
-            if rate is not None and rate>0:
-                de=to_eur(rate*q,a.get('currency'))
-                if de is not None:
-                    dividends += de; div_ok=True
-        except Exception: pass
-    return {'total':total,'pnl':pnl_total,'return_pct':ret,'day_eur':day_eur if day_ok else None,'dividends':dividends if div_ok else None}
+            qr=_portfolio_quick_row(r)
+            if qr: out.append(qr)
+        except Exception as e: out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
+        prog.progress(i/max(len(inputs),1),text=f'{i}/{len(inputs)}')
+    prog.empty(); st.session_state['v14_portfolio_rows']=out; _v31_store_snapshot(out); save_persistent_state(show_error=False); st.rerun()
+
+def _v32_storage_controls():
+    status=st.session_state.get('persistence_status','Apenas sessão')
+    read_ok=st.session_state.get('_persistence_read_ok')
+    with st.expander('Sincronização e armazenamento', expanded=False):
+        if status=='Ligado':
+            last=st.session_state.get('persistence_last_save')
+            st.success('Supabase ligado' + (f' · última gravação {last}' if last else ''))
+        elif status=='Erro':
+            st.warning('Supabase temporariamente indisponível. O snapshot existente não foi substituído.')
+            st.code(st.session_state.get('persistence_error','Erro desconhecido'))
+        else:
+            st.info('Armazenamento permanente ainda não configurado. A sessão continua funcional.')
+        c1,c2=st.columns(2)
+        with c1:
+            if st.button('Guardar agora',use_container_width=True,key='persist_save_now',disabled=(persistence_enabled() and read_ok is False)):
+                if save_persistent_state(show_error=True): st.success('Dados guardados.')
+        with c2:
+            if st.button('Recarregar',use_container_width=True,key='persist_reload_now',disabled=not persistence_enabled()):
+                if load_persistent_state(force=True): st.rerun()
+                else: st.error('A ligação continua indisponível.')
+        if status=='Apenas sessão':
+            st.caption('Configuração: SUPABASE_URL e SUPABASE_SECRET_KEY nos Secrets do Streamlit. As credenciais nunca devem ficar no GitHub.')
 
 def _v31_render_today():
-    if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
-        load_persistent_state(fast=True)
+    if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
     rows=_v31_rows(); inputs=st.session_state.get('portfolio_input',[]) or []
-    st.markdown('<div class="ci-title">Hoje</div><div class="ci-subtitle">A tua carteira, desempenho e o que merece atenção.</div>',unsafe_allow_html=True)
+    st.markdown('<div class="sy-page-title">Visão Geral</div><div class="sy-page-sub">A carteira primeiro. O detalhe só aparece quando precisas.</div>',unsafe_allow_html=True)
     if not rows:
-        read_failed = persistence_enabled() and st.session_state.get('_persistence_read_ok') is False
-        st.markdown(f'''<div class="ci-grid"><div class="ci-kpi"><div class="ci-kpi-label">Posições</div><div class="ci-kpi-value">{len(inputs) if inputs else '—'}</div><div class="ci-kpi-note">{'registadas' if inputs else 'por carregar'}</div></div><div class="ci-kpi"><div class="ci-kpi-label">Estado</div><div class="ci-kpi-value">{'!' if read_failed else '—'}</div><div class="ci-kpi-note">{'armazenamento indisponível' if read_failed else 'sem snapshot de mercado'}</div></div></div>''',unsafe_allow_html=True)
+        read_failed=persistence_enabled() and st.session_state.get('_persistence_read_ok') is False
+        st.markdown(f'''<div class="sy-hero"><div class="sy-eyebrow">EM CARTEIRA</div><div class="sy-value">{len(inputs) if inputs else '—'} posições</div><div class="sy-today na">{'Armazenamento indisponível' if read_failed else 'Ainda sem snapshot de mercado'}</div></div>''',unsafe_allow_html=True)
         if read_failed:
-            st.error('Não consegui carregar a carteira guardada. Não estou a assumir que tens 0 posições.')
-            with st.expander('Ver erro de armazenamento'):
-                st.code(st.session_state.get('persistence_error','Erro desconhecido'))
-            if st.button('Tentar carregar novamente',type='primary',use_container_width=True,key='v31_today_retry_storage'):
-                load_persistent_state(force=True,fast=False); st.rerun()
+            st.error('Não consegui ler a carteira guardada. A app não está a assumir que tens 0 posições.')
+            if st.button('Tentar carregar novamente',type='primary',use_container_width=True,key='v32_retry_storage'): load_persistent_state(force=True,fast=False); st.rerun()
+            with st.expander('Detalhe técnico'): st.code(st.session_state.get('persistence_error','Erro desconhecido'))
         elif inputs:
-            st.info('A carteira está carregada. Ainda não existe um snapshot de mercado guardado; atualiza uma vez e, nas próximas aberturas, o dashboard aparece imediatamente.')
-            if st.button('Atualizar carteira agora',type='primary',use_container_width=True,key='v31_today_refresh_empty'):
-                out=[]; prog=st.progress(0,text='A atualizar posições...')
-                for i,r in enumerate(inputs,1):
-                    try:
-                        qr=_portfolio_quick_row(r)
-                        if qr: out.append(qr)
-                    except Exception as e: out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
-                    prog.progress(i/max(len(inputs),1),text=f'{i}/{len(inputs)}')
-                prog.empty(); st.session_state['v14_portfolio_rows']=out; _v31_store_snapshot(out); save_persistent_state(show_error=False); st.rerun()
-        else:
-            st.warning('Ainda não foi possível carregar posições. Abre **Carteira** para importar um extrato/CSV ou confirmar a ligação ao armazenamento.')
+            st.info('A carteira foi carregada, mas ainda não existe um snapshot de mercado. Atualiza uma vez; depois a Visão Geral abre com os últimos valores guardados.')
+            if st.button('Atualizar carteira',type='primary',use_container_width=True,key='v32_refresh_empty'): _v32_refresh_portfolio()
+        else: st.info('Importa a carteira em **Carteira**. Depois a Visão Geral abre com o último snapshot guardado.')
         return
-    good=[r for r in rows if not r.get('Erro')]
-    s=_v31_portfolio_stats(good)
-    dclass='ci-kpi-delta' if (_safe_float(s.get('pnl')) or 0)>=0 else 'ci-kpi-delta'
-    html_k=f'''<div class="ci-grid">
-      <div class="ci-kpi"><div class="ci-kpi-label">Valor da carteira</div><div class="ci-kpi-value">{_v31_money(s['total'])}</div><div class="ci-kpi-note">{len(inputs) or len(rows)} posições</div></div>
-      <div class="ci-kpi"><div class="ci-kpi-label">Hoje</div><div class="ci-kpi-value">{_v31_money(s['day_eur'])}</div><div class="ci-kpi-note">variação estimada das posições analisadas</div></div>
-      <div class="ci-kpi"><div class="ci-kpi-label">Resultado total</div><div class="ci-kpi-value">{_v31_money(s['pnl'])}</div><div class="ci-kpi-delta">{_v31_pct(s['return_pct'])}</div></div>
-      <div class="ci-kpi"><div class="ci-kpi-label">Dividendos/ano est.</div><div class="ci-kpi-value">{_v31_money(s['dividends'])}</div><div class="ci-kpi-note">quando a fonte disponibiliza dividendRate</div></div>
-    </div>'''
-    st.markdown(html_k,unsafe_allow_html=True)
-    # Indicative history from currently held positions with loaded analysis only.
-    series=[]
-    for r in good:
-        a=r.get('_analysis'); v=_safe_float(r.get('Valor atual EUR'))
-        if not a or not v or v<=0 or r.get('Tipo instrumento')=='CFD': continue
-        try:
-            ss=a['df']['Close'].tail(252).dropna();
-            if len(ss)>10: series.append((ss/float(ss.iloc[0]),v))
-        except Exception: pass
-    if series:
-        idx=series[0][0].index
-        for ss,_ in series[1:]: idx=idx.intersection(ss.index)
-        if len(idx)>10:
-            totalw=sum(w for _,w in series)
-            port=sum(ss.reindex(idx)*w for ss,w in series)/totalw
-            perf=(port/port.iloc[0]-1)*100
-            st.markdown('<div class="ci-panel"><div class="ci-panel-title">Evolução indicativa das posições atuais</div>',unsafe_allow_html=True)
-            st.line_chart(perf.rename('Carteira'),height=245)
-            st.caption('Indicativo: usa as posições atuais e não reconstrói compras/vendas históricas nem todos os efeitos cambiais. O retorno total acima usa o teu preço médio.')
-            st.markdown('</div>',unsafe_allow_html=True)
-    # attention
-    attention=[]
-    for r in good:
-        bucket,color=_v31_decision_bucket(r.get('Decisão principal'))
-        priority={'Rever':0,'Reforçar':1,'Aguardar':2,'Manter':3,'Acompanhar':4}.get(bucket,4)
-        attention.append((priority,r,bucket,color))
-    attention.sort(key=lambda x:x[0])
-    rows_html=[]
-    for _,r,bucket,color in attention[:4]:
-        msg=str(r.get('Decisão principal') or '')
-        rows_html.append(f'<div class="ci-attn-row"><div class="ci-ticker">{html.escape(str(r.get("Ticker XTB") or ""))}</div><div class="ci-muted">{html.escape(msg)}</div><div><span class="ci-pill {color}">{bucket}</span></div></div>')
-    st.markdown('<div class="ci-panel ci-attn"><div class="ci-panel-title">◎ O que merece atenção hoje</div>'+''.join(rows_html)+'</div>',unsafe_allow_html=True)
-    # summary counts
+    good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]; s=_v31_portfolio_stats(good)
+    d=s.get('day_eur'); dp=s.get('day_pct'); dcls='pos' if (d or 0)>=0 else 'neg'; dtext=(_v31_money(d)+' · '+_v31_pct(dp)+' hoje') if d is not None else 'Variação do dia indisponível no snapshot'
     counts={'Manter':0,'Reforçar':0,'Aguardar':0,'Rever':0,'Acompanhar':0}
     for r in good: counts[_v31_decision_bucket(r.get('Decisão principal'))[0]]+=1
-    st.markdown(f'''<div class="ci-panel"><div class="ci-panel-title">A tua carteira em resumo</div>
-    <div class="ci-attn-row"><div><span class="ci-pill green">●</span></div><div>Manter</div><div class="ci-pos-main">{counts['Manter']}</div></div>
-    <div class="ci-attn-row"><div><span class="ci-pill blue">●</span></div><div>Candidatas a reforço</div><div class="ci-pos-main">{counts['Reforçar']}</div></div>
-    <div class="ci-attn-row"><div><span class="ci-pill orange">●</span></div><div>Aguardar</div><div class="ci-pos-main">{counts['Aguardar']}</div></div>
-    <div class="ci-attn-row"><div><span class="ci-pill red">●</span></div><div>Rever / reduzir</div><div class="ci-pos-main">{counts['Rever']}</div></div></div>''',unsafe_allow_html=True)
-    if st.button('Atualizar dados de mercado',use_container_width=True,key='v31_today_refresh'):
-        out=[]; prog=st.progress(0,text='A atualizar posições...')
-        for i,r in enumerate(inputs,1):
-            try:
-                qr=_portfolio_quick_row(r)
-                if qr: out.append(qr)
-            except Exception as e: out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
-            prog.progress(i/max(len(inputs),1),text=f'{i}/{len(inputs)}')
-        prog.empty(); st.session_state['v14_portfolio_rows']=out; _v31_store_snapshot(out); save_persistent_state(show_error=False); st.rerun()
+    st.markdown(f'''<div class="sy-hero"><div class="sy-hero-top"><div><div class="sy-eyebrow">EM CARTEIRA · {len(inputs) or len(rows)} POSIÇÕES</div><div class="sy-value">{_v31_money(s.get('total'))}</div><div class="sy-today {dcls}">{dtext}</div></div><div class="sy-live"><span class="sy-dot"></span>{html.escape(_v32_updated_label())}</div></div><div class="sy-hero-meta"><div><div class="sy-meta-label">Resultado total</div><div class="sy-meta-val">{_v31_money(s.get('pnl'))}</div></div><div><div class="sy-meta-label">Rentabilidade</div><div class="sy-meta-val">{_v31_pct(s.get('return_pct'))}</div></div><div><div class="sy-meta-label">A rever</div><div class="sy-meta-val">{counts['Rever']}</div></div><div><div class="sy-meta-label">Candidatas a reforço</div><div class="sy-meta-val">{counts['Reforçar']}</div></div></div></div>''',unsafe_allow_html=True)
+    st.markdown(f'''<div class="sy-grid-3"><div class="sy-stat"><div class="sy-stat-label">Manter</div><div class="sy-stat-value">{counts['Manter']}</div><div class="sy-stat-note">sem ação imediata</div></div><div class="sy-stat"><div class="sy-stat-label">Aguardar</div><div class="sy-stat-value">{counts['Aguardar']}</div><div class="sy-stat-note">entrada/reforço ainda não ideal</div></div><div class="sy-stat"><div class="sy-stat-label">Cobertura</div><div class="sy-stat-value">{len(good)}/{len(inputs) or len(rows)}</div><div class="sy-stat-note">posições com dados no snapshot</div></div></div>''',unsafe_allow_html=True)
+    left,right=st.columns([1.55,.85],gap='large')
+    with left:
+        st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">As minhas posições</div><div class="sy-card-sub">Preço, dia e resultado desde o preço médio</div></div></div>'+_v32_positions_html(good,limit=8)+'</div>',unsafe_allow_html=True)
+        if len(good)>8: st.caption(f'Mostradas as 8 maiores posições por valor. Vê as {len(good)} em Carteira.')
+    with right:
+        sectors=_v32_sector_weights(good); bars=[]
+        for sec,w in sectors[:6]: bars.append(f'<div class="sy-bar-row"><div class="sy-bar-top"><span>{html.escape(sec)}</span><strong>{w:.1f}%</strong></div><div class="sy-track"><div class="sy-fill" style="width:{min(100,max(0,w)):.1f}%"></div></div></div>')
+        st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">Exposição</div><div class="sy-card-sub">Peso por setor no último snapshot</div></div></div>'+(''.join(bars) if bars else '<div class="sy-card-sub">Sem valores suficientes.</div>')+'</div>',unsafe_allow_html=True)
+        st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">O que merece atenção</div><div class="sy-card-sub">Prioridades do último snapshot</div></div></div>'+_v32_attention_html(good,4)+'</div>',unsafe_allow_html=True)
+    if st.button('Atualizar dados de mercado',use_container_width=True,key='v32_today_refresh'): _v32_refresh_portfolio()
+    st.caption('Os preços mostrados são os do último snapshot guardado; a app não os apresenta como streaming em tempo real.')
 
 def _v31_render_positions(rows):
     good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]
-    if not good: return
-    filters=['Todas','Manter','Reforçar','Aguardar','Rever']
-    f=st.segmented_control('Filtrar',filters,default='Todas',key='v31_pos_filter',label_visibility='collapsed') if hasattr(st,'segmented_control') else st.radio('Filtrar',filters,horizontal=True,key='v31_pos_filter')
+    if not good: st.markdown('<div class="sy-empty">Ainda não existem posições com dados de mercado no snapshot.</div>',unsafe_allow_html=True); return
+    s=_v31_portfolio_stats(good)
+    st.markdown(f'''<div class="sy-hero"><div class="sy-hero-top"><div><div class="sy-eyebrow">CARTEIRA · {len(good)} POSIÇÕES COM DADOS</div><div class="sy-value">{_v31_money(s.get('total'))}</div><div class="sy-today {'pos' if (_safe_float(s.get('pnl')) or 0)>=0 else 'neg'}">{_v31_money(s.get('pnl'))} · {_v31_pct(s.get('return_pct'))} desde o preço médio</div></div><div class="sy-live"><span class="sy-dot"></span>{html.escape(_v32_updated_label())}</div></div></div>''',unsafe_allow_html=True)
+    filters=['Todas','Manter','Reforçar','Aguardar','Rever']; f=st.segmented_control('Filtrar',filters,default='Todas',key='v31_pos_filter',label_visibility='collapsed') if hasattr(st,'segmented_control') else st.radio('Filtrar',filters,horizontal=True,key='v31_pos_filter')
     selected=[]
     for r in good:
-        bucket,color=_v31_decision_bucket(r.get('Decisão principal'))
-        if f=='Todas' or bucket==f: selected.append((r,bucket,color))
-    st.markdown(f'<div class="ci-panel"><div class="ci-panel-title">Posições ({len(good)})</div>',unsafe_allow_html=True)
-    for r,bucket,color in selected:
-        pnl=_safe_float(r.get('P/L EUR aprox.')); pnlpct=_safe_float(r.get('P/L %')); price=_safe_float(r.get('Preço atual'))
-        cls='ci-positive' if (pnl or 0)>=0 else 'ci-negative'
-        st.markdown(f'''<div class="ci-position"><div><div class="ci-pos-main">{html.escape(str(r.get('Ticker XTB') or ''))}</div><div class="ci-company">{html.escape(str(r.get('Empresa') or ''))}</div></div><div><div class="ci-muted">Preço</div><div>{price:.2f} {html.escape(str(r.get('Moeda') or '')) if price is not None else 'N/D'}</div></div><div><div class="ci-muted">Resultado</div><div class="{cls}">{_v31_money(pnl)}<br>{_v31_pct(pnlpct)}</div></div><div class="hide-mobile"><div class="ci-muted">Peso</div><div>{'N/D'}</div></div><div><span class="ci-pill {color}">{bucket}</span></div></div>''',unsafe_allow_html=True)
-    st.markdown('</div>',unsafe_allow_html=True)
+        bucket,_=_v31_decision_bucket(r.get('Decisão principal'))
+        if f=='Todas' or bucket==f: selected.append(r)
+    st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">Posições</div><div class="sy-card-sub">Ordenadas por peso aproximado na carteira</div></div></div>'+_v32_positions_html(selected,show_status=True)+'</div>',unsafe_allow_html=True)
 
 def _comparison_metric_card(label, ticker, note=''):
     st.metric(label,ticker or 'N/D')
     if note:
         st.caption(note)
 
-st.caption('Decisões claras primeiro. O detalhe fica disponível quando precisas.')
-TOP_PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Descobrir', 'Analisar'], horizontal=True, label_visibility='collapsed', key='main_page_v31', format_func=lambda x:{'Hoje':'⌂  Hoje','Carteira':'▣  Carteira','Descobrir':'◉  Descobrir','Analisar':'⌕  Analisar'}[x])
+TOP_PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Descobrir', 'Analisar'], horizontal=True, label_visibility='collapsed', key='main_page_v31', format_func=lambda x:{'Hoje':'⌂  Visão geral','Carteira':'▣  Carteira','Descobrir':'◉  Radar','Analisar':'⌕  Analisar'}[x])
 PAGE = TOP_PAGE
 if TOP_PAGE == 'Carteira':
     _carteira_view = st.radio('Carteira', ['Posições', 'Risco e alertas'], horizontal=True, label_visibility='collapsed', key='carteira_view_v31')
@@ -4253,71 +4288,13 @@ if PAGE == 'Hoje':
     _v31_render_today()
 
 elif PAGE == 'Carteira':
-    st.markdown('<div class="ci-title">Carteira</div><div class="ci-subtitle">Posições, resultado e decisões num só lugar.</div>',unsafe_allow_html=True)
+    st.markdown('<div class="sy-page-title">Carteira</div><div class="sy-page-sub">Todas as posições, com o resultado e o estado da última análise.</div>',unsafe_allow_html=True)
     if not st.session_state.get('_persistent_loaded'):
-        with st.spinner('A carregar a carteira guardada...'):
-            load_persistent_state()
-    status=st.session_state.get('persistence_status','Apenas sessão')
-    if status=='Ligado':
-        last=st.session_state.get('persistence_last_save')
-        msg='Dados permanentes: **Ligado**' + (f' · última gravação {last}' if last else '')
-        st.success(msg)
-    elif status=='Erro':
-        st.error('Não foi possível carregar a carteira guardada. **Os dados remotos não foram substituídos.**')
-        st.caption('A app mantém a gravação bloqueada até conseguir ler o Supabase, para evitar gravar uma carteira vazia por engano.')
-        with st.expander('Ver erro de armazenamento'):
-            st.code(st.session_state.get('persistence_error','Erro desconhecido'))
-    else:
-        st.warning('Dados permanentes: **não configurados**. A carteira fica apenas nesta sessão. Configura o Supabase nos Secrets do Streamlit para guardar automaticamente.')
-        with st.expander('Como ativar a gravação permanente'):
-            st.markdown('''
-1. Cria um projeto gratuito no **Supabase**.
-2. Executa o ficheiro `supabase_setup.sql` no SQL Editor do projeto.
-3. No Streamlit Cloud abre **App settings → Secrets** e adiciona:
-```toml
-SUPABASE_URL = "https://SEU-PROJETO.supabase.co"
-SUPABASE_SECRET_KEY = "sb_secret_..."
-
-[USERS.vitor]
-password = "uma-palavra-passe-forte"
-owner_id = "carteira-principal" # usa o owner_id atual para manter a carteira existente
-display_name = "Vítor"
-
-[USERS.utilizador2]
-password = "outra-palavra-passe"
-owner_id = "utilizador2"
-display_name = "Utilizador 2"
-```
-4. Guarda os Secrets e reinicia a app. Cada login passa a usar o seu `owner_id` e os dados ficam separados.
-
-A configuração antiga com `APP_PASSWORD` + `PORTFOLIO_OWNER_ID` continua compatível para uma única conta.
-
-**Não coloques chaves nem palavras-passe no GitHub.** Devem existir apenas nos Secrets do Streamlit.
-''')
-
-    cstore1,cstore2=st.columns(2)
-    read_ok=st.session_state.get('_persistence_read_ok')
-    with cstore1:
-        if st.button('Guardar carteira agora',use_container_width=True,key='persist_save_now',disabled=(persistence_enabled() and read_ok is False)):
-            if save_persistent_state(show_error=True):
-                st.success('Carteira e histórico guardados permanentemente.')
-    with cstore2:
-        if st.button('Tentar carregar novamente',use_container_width=True,key='persist_reload_now',disabled=not persistence_enabled()):
-            ok=load_persistent_state(force=True)
-            if ok:
-                st.success('Carteira guardada recuperada com sucesso.')
-                st.rerun()
-            else:
-                st.error('A ligação continua indisponível. A app não gravou nem apagou a carteira remota.')
-
+        load_persistent_state(fast=True)
     _v31_current_rows=_v31_rows()
     if _v31_current_rows:
         _v31_render_positions(_v31_current_rows)
-
-    with st.expander('Gestão da carteira · adicionar, importar e exportar', expanded=False):
-        st.caption('Mantemos estas ferramentas recolhidas para a página principal continuar simples.')
-
-    st.caption('A pergunta principal aqui é simples: manter, reforçar, aguardar ou rever?')
+    _v32_storage_controls()
 
     with st.expander('➕ Adicionar posição'):
         with st.form('v14_manual_position',clear_on_submit=False):
@@ -4390,6 +4367,7 @@ A configuração antiga com `APP_PASSWORD` + `PORTFOLIO_OWNER_ID` continua compa
             prog.empty()
             st.session_state['v14_portfolio_rows']=out
             _v31_store_snapshot(out)
+            save_persistent_state(show_error=False)
 
         prow=st.session_state.get('v14_portfolio_rows',[])
         if prow:
@@ -4609,7 +4587,7 @@ elif PAGE == 'Risco':
 
 
 elif PAGE == 'Relatório':
-    st.markdown('<div class="ci-title">Analisar ação</div><div class="ci-subtitle">Carrega o InvestingPro. A app valida se a empresa é boa e se o preço atual justifica entrada.</div>',unsafe_allow_html=True)
+    st.markdown('<div class="sy-page-title">Analisar ação</div><div class="sy-page-sub">Relatório InvestingPro + mercado + técnica: vale a pena entrar agora?</div>',unsafe_allow_html=True)
     if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
         load_persistent_state()
 
