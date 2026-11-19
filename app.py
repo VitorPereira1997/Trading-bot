@@ -54,6 +54,7 @@ def _clear_user_session(clear_auth=False):
         '_persistent_loaded','v14_portfolio_rows','v14_hist_revalued','v14_port_detail_result',
         'comparison_df','comparison_time','v14_scan_rows','v20_scan_time','v14_analysis','v14_analysis_detail',
         'report_parsed','report_result','report_file_name','report_library','_report_last_upload_hash','v29_analysis_insiders',
+        'portfolio_snapshot','portfolio_snapshot_updated_at',
     }
     prefixes=('alert_','risk_','decision_stats_')
     for key in list(st.session_state.keys()):
@@ -259,6 +260,10 @@ if 'alerts' not in st.session_state:
     st.session_state.alerts = []
 if 'report_library' not in st.session_state:
     st.session_state.report_library = {}
+if 'portfolio_snapshot' not in st.session_state:
+    st.session_state.portfolio_snapshot = []
+if 'portfolio_snapshot_updated_at' not in st.session_state:
+    st.session_state.portfolio_snapshot_updated_at = None
 
 # -----------------------------------------------------------------------------
 # Persistência permanente (Supabase)
@@ -360,6 +365,8 @@ def persistent_state_payload():
         'investingpro_data':_json_safe(st.session_state.get('investingpro_data',{})),
         'investingpro_import_meta':_json_safe(st.session_state.get('investingpro_import_meta',{})),
         'report_library':_json_safe(st.session_state.get('report_library',{})),
+        'portfolio_snapshot':_json_safe(st.session_state.get('portfolio_snapshot',[])),
+        'portfolio_snapshot_updated_at':_json_safe(st.session_state.get('portfolio_snapshot_updated_at')),
     }
 
 def save_persistent_state(show_error=False):
@@ -398,7 +405,7 @@ def save_persistent_state(show_error=False):
             st.error(f'Não foi possível guardar permanentemente: {e}')
         return False
 
-def load_persistent_state(force=False):
+def load_persistent_state(force=False, fast=False):
     if st.session_state.get('_persistent_loaded') and not force:
         return True
     if not persistence_enabled():
@@ -409,7 +416,7 @@ def load_persistent_state(force=False):
     _,_,owner=persistence_config()
     q=urllib.parse.quote(owner,safe='')
     try:
-        rows=_supabase_request('GET',f'/rest/v1/trading_bot_state?owner_id=eq.{q}&select=state,updated_at') or []
+        rows=_supabase_request('GET',f'/rest/v1/trading_bot_state?owner_id=eq.{q}&select=state,updated_at',timeout=(2.5 if fast else 6),retries=(1 if fast else 3)) or []
         if rows:
             state=rows[0].get('state') or {}
             st.session_state.portfolio_input=list(state.get('portfolio_input') or [])
@@ -419,6 +426,11 @@ def load_persistent_state(force=False):
             st.session_state.investingpro_data=dict(state.get('investingpro_data') or {})
             st.session_state.investingpro_import_meta=dict(state.get('investingpro_import_meta') or {})
             st.session_state.report_library=dict(state.get('report_library') or {})
+            st.session_state.portfolio_snapshot=list(state.get('portfolio_snapshot') or [])
+            st.session_state.portfolio_snapshot_updated_at=state.get('portfolio_snapshot_updated_at')
+            if st.session_state.portfolio_snapshot:
+                st.session_state['portfolio_rows']=list(st.session_state.portfolio_snapshot)
+                st.session_state['v14_portfolio_rows']=list(st.session_state.portfolio_snapshot)
             st.session_state['persistence_last_save']=rows[0].get('updated_at')
         else:
             # Só assumimos carteira vazia depois de uma leitura REMOTA bem sucedida.
@@ -429,6 +441,8 @@ def load_persistent_state(force=False):
             st.session_state.investingpro_data={}
             st.session_state.investingpro_import_meta={}
             st.session_state.report_library={}
+            st.session_state.portfolio_snapshot=[]
+            st.session_state.portfolio_snapshot_updated_at=None
         st.session_state['_persistent_loaded']=True
         st.session_state['_persistence_read_ok']=True
         st.session_state['persistence_status']='Ligado'
@@ -3807,12 +3821,12 @@ html, body, [data-testid="stAppViewContainer"] {background:#fff;}
 [data-testid="stFileUploader"]{border:1px dashed #c8d2e3;border-radius:18px;padding:.35rem;background:#fafbff}
 .stButton>button[kind="primary"]{border-radius:14px;background:var(--ci-navy);border-color:var(--ci-navy);font-weight:750}.stButton>button{border-radius:14px;min-height:2.8rem}
 /* Main navigation */
-div[role="radiogroup"]{gap:.35rem;background:#f5f7fb;border-radius:16px;padding:.25rem}.stRadio label{padding:.4rem .72rem;border-radius:12px}
+div[role="radiogroup"]{gap:.35rem;background:#f5f7fb;border-radius:16px;padding:.25rem}.stRadio label{padding:.4rem .72rem;border-radius:12px;color:var(--ci-navy)!important}.stRadio label p{color:var(--ci-navy)!important;font-weight:650}
 @media (max-width: 760px){
   .block-container{padding-left:.78rem;padding-right:.78rem;padding-top:.35rem;padding-bottom:6.5rem}.ci-header{position:sticky;top:0;background:rgba(255,255,255,.95);backdrop-filter:blur(10px);z-index:98;margin-left:-.2rem;margin-right:-.2rem;padding:.55rem .2rem .65rem}.ci-title{font-size:1.8rem}.ci-grid{grid-template-columns:1fr 1fr;gap:.6rem}.ci-kpi{padding:.8rem;min-height:96px}.ci-kpi-value{font-size:1.35rem}.ci-attn-row{grid-template-columns:62px 1fr;}.ci-attn-row .ci-pill{grid-column:2;justify-self:start}.ci-position{grid-template-columns:1.4fr .8fr .8fr;}.ci-position .hide-mobile{display:none}.ci-triad{grid-template-columns:repeat(3,1fr)}
   div[data-testid="stRadio"]:has(input[value="Hoje"]), div[data-testid="stRadio"]:has(input[value="Carteira"]), div[data-testid="stRadio"]:has(input[value="Descobrir"]), div[data-testid="stRadio"]:has(input[value="Analisar"]){position:fixed;left:.55rem;right:.55rem;bottom:.45rem;z-index:999;background:white;border:1px solid #dde3ee;border-radius:20px;padding:.25rem .35rem;box-shadow:0 10px 30px rgba(15,23,42,.16)}
   div[data-testid="stRadio"]:has(input[value="Hoje"]) div[role="radiogroup"]{display:grid;grid-template-columns:repeat(4,1fr);background:white;padding:0;gap:.1rem}
-  div[data-testid="stRadio"]:has(input[value="Hoje"]) label{justify-content:center;text-align:center;font-size:.77rem;padding:.55rem .2rem}
+  div[data-testid="stRadio"]:has(input[value="Hoje"]) label{justify-content:center;text-align:center;font-size:.77rem;padding:.55rem .2rem;color:var(--ci-navy)!important} div[data-testid="stRadio"]:has(input[value="Hoje"]) label p{color:var(--ci-navy)!important;font-weight:750}
 }
 </style>
 ''', unsafe_allow_html=True)
@@ -4070,6 +4084,16 @@ def _v31_decision_bucket(action):
     if 'REVER' in a or 'REDUZIR' in a or 'VENDER' in a or 'ALVO' in a: return 'Rever','red'
     return 'Acompanhar','gray'
 
+def _v31_store_snapshot(rows):
+    clean=[]
+    for r in rows or []:
+        if not isinstance(r,dict):
+            continue
+        clean.append({k:_json_safe(v) for k,v in r.items() if k!='_analysis'})
+    st.session_state['portfolio_snapshot']=clean
+    st.session_state['portfolio_snapshot_updated_at']=datetime.now(timezone.utc).isoformat()
+    st.session_state['portfolio_rows']=list(clean)
+
 def _v31_rows():
     rows=st.session_state.get('v14_portfolio_rows') or st.session_state.get('portfolio_rows') or []
     return [r for r in rows if isinstance(r,dict)]
@@ -4106,21 +4130,31 @@ def _v31_portfolio_stats(rows):
 
 def _v31_render_today():
     if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
-        load_persistent_state()
+        load_persistent_state(fast=True)
     rows=_v31_rows(); inputs=st.session_state.get('portfolio_input',[]) or []
     st.markdown('<div class="ci-title">Hoje</div><div class="ci-subtitle">A tua carteira, desempenho e o que merece atenção.</div>',unsafe_allow_html=True)
     if not rows:
-        st.markdown(f'''<div class="ci-grid"><div class="ci-kpi"><div class="ci-kpi-label">Posições</div><div class="ci-kpi-value">{len(inputs)}</div><div class="ci-kpi-note">registadas</div></div><div class="ci-kpi"><div class="ci-kpi-label">Estado</div><div class="ci-kpi-value">—</div><div class="ci-kpi-note">atualiza para obter mercado</div></div></div>''',unsafe_allow_html=True)
-        st.info('A carteira está carregada, mas ainda não existem dados de mercado atualizados nesta sessão.')
-        if inputs and st.button('Atualizar carteira agora',type='primary',use_container_width=True,key='v31_today_refresh_empty'):
-            out=[]; prog=st.progress(0,text='A atualizar posições...')
-            for i,r in enumerate(inputs,1):
-                try:
-                    qr=_portfolio_quick_row(r)
-                    if qr: out.append(qr)
-                except Exception as e: out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
-                prog.progress(i/max(len(inputs),1),text=f'{i}/{len(inputs)}')
-            prog.empty(); st.session_state['v14_portfolio_rows']=out; st.session_state['portfolio_rows']=[{k:v for k,v in x.items() if k!='_analysis'} for x in out]; save_persistent_state(show_error=False); st.rerun()
+        read_failed = persistence_enabled() and st.session_state.get('_persistence_read_ok') is False
+        st.markdown(f'''<div class="ci-grid"><div class="ci-kpi"><div class="ci-kpi-label">Posições</div><div class="ci-kpi-value">{len(inputs) if inputs else '—'}</div><div class="ci-kpi-note">{'registadas' if inputs else 'por carregar'}</div></div><div class="ci-kpi"><div class="ci-kpi-label">Estado</div><div class="ci-kpi-value">{'!' if read_failed else '—'}</div><div class="ci-kpi-note">{'armazenamento indisponível' if read_failed else 'sem snapshot de mercado'}</div></div></div>''',unsafe_allow_html=True)
+        if read_failed:
+            st.error('Não consegui carregar a carteira guardada. Não estou a assumir que tens 0 posições.')
+            with st.expander('Ver erro de armazenamento'):
+                st.code(st.session_state.get('persistence_error','Erro desconhecido'))
+            if st.button('Tentar carregar novamente',type='primary',use_container_width=True,key='v31_today_retry_storage'):
+                load_persistent_state(force=True,fast=False); st.rerun()
+        elif inputs:
+            st.info('A carteira está carregada. Ainda não existe um snapshot de mercado guardado; atualiza uma vez e, nas próximas aberturas, o dashboard aparece imediatamente.')
+            if st.button('Atualizar carteira agora',type='primary',use_container_width=True,key='v31_today_refresh_empty'):
+                out=[]; prog=st.progress(0,text='A atualizar posições...')
+                for i,r in enumerate(inputs,1):
+                    try:
+                        qr=_portfolio_quick_row(r)
+                        if qr: out.append(qr)
+                    except Exception as e: out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
+                    prog.progress(i/max(len(inputs),1),text=f'{i}/{len(inputs)}')
+                prog.empty(); st.session_state['v14_portfolio_rows']=out; _v31_store_snapshot(out); save_persistent_state(show_error=False); st.rerun()
+        else:
+            st.warning('Ainda não foi possível carregar posições. Abre **Carteira** para importar um extrato/CSV ou confirmar a ligação ao armazenamento.')
         return
     good=[r for r in rows if not r.get('Erro')]
     s=_v31_portfolio_stats(good)
@@ -4180,7 +4214,7 @@ def _v31_render_today():
                 if qr: out.append(qr)
             except Exception as e: out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
             prog.progress(i/max(len(inputs),1),text=f'{i}/{len(inputs)}')
-        prog.empty(); st.session_state['v14_portfolio_rows']=out; st.session_state['portfolio_rows']=[{k:v for k,v in x.items() if k!='_analysis'} for x in out]; save_persistent_state(show_error=False); st.rerun()
+        prog.empty(); st.session_state['v14_portfolio_rows']=out; _v31_store_snapshot(out); save_persistent_state(show_error=False); st.rerun()
 
 def _v31_render_positions(rows):
     good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]
@@ -4355,7 +4389,7 @@ A configuração antiga com `APP_PASSWORD` + `PORTFOLIO_OWNER_ID` continua compa
                 prog.progress(i/max(len(st.session_state.portfolio_input),1),text=f'{i}/{len(st.session_state.portfolio_input)}')
             prog.empty()
             st.session_state['v14_portfolio_rows']=out
-            st.session_state['portfolio_rows']=[{k:v for k,v in x.items() if k!='_analysis'} for x in out]
+            _v31_store_snapshot(out)
 
         prow=st.session_state.get('v14_portfolio_rows',[])
         if prow:
@@ -4495,7 +4529,7 @@ elif PAGE == 'Risco':
                 prog.progress(i/max(len(st.session_state.portfolio_input),1),text=f'{i}/{len(st.session_state.portfolio_input)}')
             prog.empty()
             st.session_state['v14_portfolio_rows']=out
-            st.session_state['portfolio_rows']=[{k:v for k,v in x.items() if k!='_analysis'} for x in out]
+            _v31_store_snapshot(out)
 
         rows=st.session_state.get('v14_portfolio_rows',[])
         good=[r for r in rows if isinstance(r,dict) and r.get('_analysis')]
