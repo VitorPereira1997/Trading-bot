@@ -111,8 +111,12 @@ if st.session_state.get('_app_authenticated'):
         _clear_user_session(clear_auth=True)
         st.rerun()
 
-st.title('📊 Carteira Inteligente')
-st.caption('Curto prazo · Longo prazo · Evidências essenciais. Dados identificados; não envia ordens reais.')
+st.markdown('''
+<div class="ci-header">
+  <div class="ci-brand"><span class="ci-mark">▮▮▮</span><span>Carteira<br>Inteligente</span></div>
+  <div class="ci-user">''' + html.escape(str(st.session_state.get('_user_display') or '')) + '''</div>
+</div>
+''', unsafe_allow_html=True)
 
 
 MARKETS = {
@@ -3775,26 +3779,40 @@ def decision_performance_standardized():
 
 
 # -----------------------------------------------------------------------------
-# Interface simples / rápida (v14)
+# Interface mobile-first (v31)
 # -----------------------------------------------------------------------------
 st.markdown('''
 <style>
-.block-container {padding-top: 1.2rem; padding-bottom: 3rem; max-width: 1180px;}
-[data-testid="stMetric"] {background: rgba(127,127,127,.06); border: 1px solid rgba(127,127,127,.18); padding: .7rem; border-radius: 14px;}
-.asset-card {border:1px solid rgba(127,127,127,.20); border-radius:16px; padding:14px 15px; margin:9px 0; background:rgba(127,127,127,.035);}
-.asset-head {display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:7px;}
-.asset-title {font-size:1.02rem; font-weight:750; line-height:1.2;}
-.asset-sub {opacity:.68; font-size:.82rem; margin-top:2px;}
-.asset-action {font-weight:750; text-align:right; font-size:.90rem;}
-.ev {font-size:.88rem; margin-top:4px; opacity:.92;}
-.score {opacity:.70; font-size:.78rem; margin-top:3px;}
-.good {color:#16a34a;} .wait {color:#d97706;} .bad {color:#dc2626;} .neutral {color:#64748b;}
-.section-note {opacity:.72; font-size:.88rem; margin-bottom:.5rem;}
-@media (max-width: 700px) {
-  .block-container {padding-left: .85rem; padding-right: .85rem;}
-  .asset-card {padding:12px;}
-  .asset-head {display:block;}
-  .asset-action {text-align:left; margin-top:7px;}
+:root {--ci-navy:#0b1b3a;--ci-blue:#1d4ed8;--ci-green:#16a34a;--ci-orange:#ea7c16;--ci-red:#dc2626;--ci-muted:#6b7280;--ci-border:#e7eaf0;--ci-bg:#f7f9fc;}
+html, body, [data-testid="stAppViewContainer"] {background:#fff;}
+.block-container {padding-top:.55rem; padding-bottom:5.8rem; max-width:1240px;}
+[data-testid="stSidebar"] {background:#fbfcfe; border-right:1px solid var(--ci-border);}
+#MainMenu, footer {visibility:hidden;}
+.ci-header{display:flex;align-items:center;justify-content:space-between;padding:.35rem .15rem .8rem;border-bottom:1px solid var(--ci-border);margin-bottom:.8rem;}
+.ci-brand{display:flex;gap:.65rem;align-items:center;font-size:1.05rem;font-weight:800;line-height:.9;color:var(--ci-navy);}
+.ci-mark{letter-spacing:-3px;color:var(--ci-green);font-size:1.4rem;transform:rotate(-2deg);}
+.ci-user{font-size:.85rem;color:var(--ci-muted);}
+.ci-title{font-size:2.05rem;font-weight:850;letter-spacing:-.035em;color:var(--ci-navy);line-height:1.05;margin:.25rem 0 .2rem;}
+.ci-subtitle{color:#4b5563;font-size:.95rem;margin-bottom:1rem;}
+.ci-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.8rem;margin:.7rem 0 1rem;}
+.ci-kpi{background:white;border:1px solid var(--ci-border);box-shadow:0 4px 16px rgba(15,23,42,.045);border-radius:18px;padding:1rem 1.05rem;min-height:108px;}
+.ci-kpi-label{font-size:.82rem;color:#4b5563;margin-bottom:.35rem;}.ci-kpi-value{font-size:1.65rem;font-weight:850;color:var(--ci-navy);letter-spacing:-.025em;}.ci-kpi-delta{display:inline-block;margin-top:.32rem;padding:.18rem .45rem;border-radius:999px;background:#eaf8ee;color:#15803d;font-weight:700;font-size:.78rem;}.ci-kpi-note{margin-top:.28rem;color:#6b7280;font-size:.78rem;}
+.ci-panel{background:#fff;border:1px solid var(--ci-border);border-radius:18px;padding:1rem 1.05rem;margin:.8rem 0;box-shadow:0 4px 16px rgba(15,23,42,.035);}
+.ci-panel-title{font-size:1.05rem;font-weight:800;color:var(--ci-navy);margin-bottom:.7rem;}.ci-attn{background:linear-gradient(135deg,#f5fff8,#fbfffc);border-color:#d9f2df;}.ci-attn-row{display:grid;grid-template-columns:90px 1fr auto;gap:.6rem;align-items:center;padding:.55rem 0;border-top:1px solid #edf3ee;}.ci-attn-row:first-of-type{border-top:0}.ci-ticker{font-weight:850;color:var(--ci-navy)}.ci-muted{color:#6b7280;font-size:.84rem}.ci-pill{display:inline-block;padding:.23rem .55rem;border-radius:999px;font-size:.76rem;font-weight:800}.ci-pill.green{background:#e9f8ed;color:#15803d}.ci-pill.blue{background:#eaf2ff;color:#1d4ed8}.ci-pill.orange{background:#fff1df;color:#c76607}.ci-pill.red{background:#feecec;color:#c81e1e}.ci-pill.gray{background:#f0f2f5;color:#667085}
+.ci-position{display:grid;grid-template-columns:minmax(130px,1.5fr) .7fr .8fr .8fr .7fr;gap:.7rem;align-items:center;padding:.72rem .1rem;border-top:1px solid #eef0f4;font-size:.88rem}.ci-position:first-of-type{border-top:0}.ci-company{font-size:.76rem;color:#6b7280}.ci-pos-main{font-weight:800;color:var(--ci-navy)}.ci-positive{color:#15803d;font-weight:800}.ci-negative{color:#dc2626;font-weight:800}
+.ci-verdict{border:1px solid #f5d8bb;background:linear-gradient(135deg,#fff9f2,#fffaf5);border-radius:20px;padding:1.05rem 1.15rem;margin:1rem 0}.ci-verdict-action{font-size:1.75rem;font-weight:900;color:#c45b08;letter-spacing:-.02em}.ci-verdict-text{font-size:1rem;color:#273244;margin:.2rem 0 .7rem}.ci-triad{display:grid;grid-template-columns:repeat(3,1fr);gap:.55rem}.ci-mini{background:#fff;border:1px solid #f0e9e2;border-radius:14px;padding:.65rem;text-align:center}.ci-mini-label{font-size:.72rem;color:#6b7280}.ci-mini-value{font-weight:850;font-size:.95rem;margin-top:.15rem}
+.asset-card {border:1px solid var(--ci-border); border-radius:18px; padding:14px 15px; margin:9px 0; background:#fff;box-shadow:0 4px 16px rgba(15,23,42,.035)}
+.asset-head {display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:7px}.asset-title {font-size:1.02rem;font-weight:800}.asset-sub{color:#6b7280;font-size:.82rem}.asset-action{font-weight:800}.ev{font-size:.88rem}.score{color:#6b7280;font-size:.78rem}.good{color:#16a34a}.wait{color:#d97706}.bad{color:#dc2626}.neutral{color:#64748b}.section-note{color:#6b7280;font-size:.88rem;margin-bottom:.5rem}
+[data-testid="stMetric"]{background:#fff;border:1px solid var(--ci-border);padding:.7rem;border-radius:16px;box-shadow:0 4px 16px rgba(15,23,42,.03)}
+[data-testid="stFileUploader"]{border:1px dashed #c8d2e3;border-radius:18px;padding:.35rem;background:#fafbff}
+.stButton>button[kind="primary"]{border-radius:14px;background:var(--ci-navy);border-color:var(--ci-navy);font-weight:750}.stButton>button{border-radius:14px;min-height:2.8rem}
+/* Main navigation */
+div[role="radiogroup"]{gap:.35rem;background:#f5f7fb;border-radius:16px;padding:.25rem}.stRadio label{padding:.4rem .72rem;border-radius:12px}
+@media (max-width: 760px){
+  .block-container{padding-left:.78rem;padding-right:.78rem;padding-top:.35rem;padding-bottom:6.5rem}.ci-header{position:sticky;top:0;background:rgba(255,255,255,.95);backdrop-filter:blur(10px);z-index:98;margin-left:-.2rem;margin-right:-.2rem;padding:.55rem .2rem .65rem}.ci-title{font-size:1.8rem}.ci-grid{grid-template-columns:1fr 1fr;gap:.6rem}.ci-kpi{padding:.8rem;min-height:96px}.ci-kpi-value{font-size:1.35rem}.ci-attn-row{grid-template-columns:62px 1fr;}.ci-attn-row .ci-pill{grid-column:2;justify-self:start}.ci-position{grid-template-columns:1.4fr .8fr .8fr;}.ci-position .hide-mobile{display:none}.ci-triad{grid-template-columns:repeat(3,1fr)}
+  div[data-testid="stRadio"]:has(input[value="Hoje"]), div[data-testid="stRadio"]:has(input[value="Carteira"]), div[data-testid="stRadio"]:has(input[value="Descobrir"]), div[data-testid="stRadio"]:has(input[value="Analisar"]){position:fixed;left:.55rem;right:.55rem;bottom:.45rem;z-index:999;background:white;border:1px solid #dde3ee;border-radius:20px;padding:.25rem .35rem;box-shadow:0 10px 30px rgba(15,23,42,.16)}
+  div[data-testid="stRadio"]:has(input[value="Hoje"]) div[role="radiogroup"]{display:grid;grid-template-columns:repeat(4,1fr);background:white;padding:0;gap:.1rem}
+  div[data-testid="stRadio"]:has(input[value="Hoje"]) label{justify-content:center;text-align:center;font-size:.77rem;padding:.55rem .2rem}
 }
 </style>
 ''', unsafe_allow_html=True)
@@ -4033,151 +4051,175 @@ def _winner_ticker(df, column, higher=True):
     return str(df.loc[idx,'Ticker'])
 
 
+
+def _v31_money(v):
+    x=_safe_float(v)
+    if x is None: return 'N/D'
+    return f"€{x:,.2f}".replace(',', 'X').replace('.', ',').replace('X','.')
+
+def _v31_pct(v):
+    x=_safe_float(v)
+    if x is None: return 'N/D'
+    return f"{x:+.2f}%".replace('.',',')
+
+def _v31_decision_bucket(action):
+    a=str(action or '').upper()
+    if 'REFORÇO' in a or 'CANDIDATO' in a: return 'Reforçar','blue'
+    if 'MANTER' in a: return 'Manter','green'
+    if 'AGUARDAR' in a or 'OBSERVAR' in a: return 'Aguardar','orange'
+    if 'REVER' in a or 'REDUZIR' in a or 'VENDER' in a or 'ALVO' in a: return 'Rever','red'
+    return 'Acompanhar','gray'
+
+def _v31_rows():
+    rows=st.session_state.get('v14_portfolio_rows') or st.session_state.get('portfolio_rows') or []
+    return [r for r in rows if isinstance(r,dict)]
+
+def _v31_portfolio_stats(rows):
+    vals=[_safe_float(r.get('Valor atual EUR')) for r in rows]
+    vals=[x for x in vals if x is not None]
+    pnl=[_safe_float(r.get('P/L EUR aprox.')) for r in rows]
+    pnl=[x for x in pnl if x is not None]
+    total=sum(vals) if vals else None
+    pnl_total=sum(pnl) if pnl else None
+    cost=(total-pnl_total) if total is not None and pnl_total is not None else None
+    ret=(pnl_total/cost*100) if cost and cost>0 else None
+    day_eur=0.0; day_ok=False
+    dividends=0.0; div_ok=False
+    for r in rows:
+        a=r.get('_analysis')
+        q=_safe_float(r.get('Quantidade')) or 0
+        if not a or q<=0 or r.get('Tipo instrumento')=='CFD': continue
+        try:
+            df=a.get('df')
+            if df is not None and len(df)>=2:
+                d=float(df['Close'].iloc[-1]-df['Close'].iloc[-2])*q
+                de=to_eur(d,a.get('currency'))
+                if de is not None:
+                    day_eur += de; day_ok=True
+            rate=_num(a.get('info') or {},'dividendRate')
+            if rate is not None and rate>0:
+                de=to_eur(rate*q,a.get('currency'))
+                if de is not None:
+                    dividends += de; div_ok=True
+        except Exception: pass
+    return {'total':total,'pnl':pnl_total,'return_pct':ret,'day_eur':day_eur if day_ok else None,'dividends':dividends if div_ok else None}
+
+def _v31_render_today():
+    if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
+        load_persistent_state()
+    rows=_v31_rows(); inputs=st.session_state.get('portfolio_input',[]) or []
+    st.markdown('<div class="ci-title">Hoje</div><div class="ci-subtitle">A tua carteira, desempenho e o que merece atenção.</div>',unsafe_allow_html=True)
+    if not rows:
+        st.markdown(f'''<div class="ci-grid"><div class="ci-kpi"><div class="ci-kpi-label">Posições</div><div class="ci-kpi-value">{len(inputs)}</div><div class="ci-kpi-note">registadas</div></div><div class="ci-kpi"><div class="ci-kpi-label">Estado</div><div class="ci-kpi-value">—</div><div class="ci-kpi-note">atualiza para obter mercado</div></div></div>''',unsafe_allow_html=True)
+        st.info('A carteira está carregada, mas ainda não existem dados de mercado atualizados nesta sessão.')
+        if inputs and st.button('Atualizar carteira agora',type='primary',use_container_width=True,key='v31_today_refresh_empty'):
+            out=[]; prog=st.progress(0,text='A atualizar posições...')
+            for i,r in enumerate(inputs,1):
+                try:
+                    qr=_portfolio_quick_row(r)
+                    if qr: out.append(qr)
+                except Exception as e: out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
+                prog.progress(i/max(len(inputs),1),text=f'{i}/{len(inputs)}')
+            prog.empty(); st.session_state['v14_portfolio_rows']=out; st.session_state['portfolio_rows']=[{k:v for k,v in x.items() if k!='_analysis'} for x in out]; save_persistent_state(show_error=False); st.rerun()
+        return
+    good=[r for r in rows if not r.get('Erro')]
+    s=_v31_portfolio_stats(good)
+    dclass='ci-kpi-delta' if (_safe_float(s.get('pnl')) or 0)>=0 else 'ci-kpi-delta'
+    html_k=f'''<div class="ci-grid">
+      <div class="ci-kpi"><div class="ci-kpi-label">Valor da carteira</div><div class="ci-kpi-value">{_v31_money(s['total'])}</div><div class="ci-kpi-note">{len(inputs) or len(rows)} posições</div></div>
+      <div class="ci-kpi"><div class="ci-kpi-label">Hoje</div><div class="ci-kpi-value">{_v31_money(s['day_eur'])}</div><div class="ci-kpi-note">variação estimada das posições analisadas</div></div>
+      <div class="ci-kpi"><div class="ci-kpi-label">Resultado total</div><div class="ci-kpi-value">{_v31_money(s['pnl'])}</div><div class="ci-kpi-delta">{_v31_pct(s['return_pct'])}</div></div>
+      <div class="ci-kpi"><div class="ci-kpi-label">Dividendos/ano est.</div><div class="ci-kpi-value">{_v31_money(s['dividends'])}</div><div class="ci-kpi-note">quando a fonte disponibiliza dividendRate</div></div>
+    </div>'''
+    st.markdown(html_k,unsafe_allow_html=True)
+    # Indicative history from currently held positions with loaded analysis only.
+    series=[]
+    for r in good:
+        a=r.get('_analysis'); v=_safe_float(r.get('Valor atual EUR'))
+        if not a or not v or v<=0 or r.get('Tipo instrumento')=='CFD': continue
+        try:
+            ss=a['df']['Close'].tail(252).dropna();
+            if len(ss)>10: series.append((ss/float(ss.iloc[0]),v))
+        except Exception: pass
+    if series:
+        idx=series[0][0].index
+        for ss,_ in series[1:]: idx=idx.intersection(ss.index)
+        if len(idx)>10:
+            totalw=sum(w for _,w in series)
+            port=sum(ss.reindex(idx)*w for ss,w in series)/totalw
+            perf=(port/port.iloc[0]-1)*100
+            st.markdown('<div class="ci-panel"><div class="ci-panel-title">Evolução indicativa das posições atuais</div>',unsafe_allow_html=True)
+            st.line_chart(perf.rename('Carteira'),height=245)
+            st.caption('Indicativo: usa as posições atuais e não reconstrói compras/vendas históricas nem todos os efeitos cambiais. O retorno total acima usa o teu preço médio.')
+            st.markdown('</div>',unsafe_allow_html=True)
+    # attention
+    attention=[]
+    for r in good:
+        bucket,color=_v31_decision_bucket(r.get('Decisão principal'))
+        priority={'Rever':0,'Reforçar':1,'Aguardar':2,'Manter':3,'Acompanhar':4}.get(bucket,4)
+        attention.append((priority,r,bucket,color))
+    attention.sort(key=lambda x:x[0])
+    rows_html=[]
+    for _,r,bucket,color in attention[:4]:
+        msg=str(r.get('Decisão principal') or '')
+        rows_html.append(f'<div class="ci-attn-row"><div class="ci-ticker">{html.escape(str(r.get("Ticker XTB") or ""))}</div><div class="ci-muted">{html.escape(msg)}</div><div><span class="ci-pill {color}">{bucket}</span></div></div>')
+    st.markdown('<div class="ci-panel ci-attn"><div class="ci-panel-title">◎ O que merece atenção hoje</div>'+''.join(rows_html)+'</div>',unsafe_allow_html=True)
+    # summary counts
+    counts={'Manter':0,'Reforçar':0,'Aguardar':0,'Rever':0,'Acompanhar':0}
+    for r in good: counts[_v31_decision_bucket(r.get('Decisão principal'))[0]]+=1
+    st.markdown(f'''<div class="ci-panel"><div class="ci-panel-title">A tua carteira em resumo</div>
+    <div class="ci-attn-row"><div><span class="ci-pill green">●</span></div><div>Manter</div><div class="ci-pos-main">{counts['Manter']}</div></div>
+    <div class="ci-attn-row"><div><span class="ci-pill blue">●</span></div><div>Candidatas a reforço</div><div class="ci-pos-main">{counts['Reforçar']}</div></div>
+    <div class="ci-attn-row"><div><span class="ci-pill orange">●</span></div><div>Aguardar</div><div class="ci-pos-main">{counts['Aguardar']}</div></div>
+    <div class="ci-attn-row"><div><span class="ci-pill red">●</span></div><div>Rever / reduzir</div><div class="ci-pos-main">{counts['Rever']}</div></div></div>''',unsafe_allow_html=True)
+    if st.button('Atualizar dados de mercado',use_container_width=True,key='v31_today_refresh'):
+        out=[]; prog=st.progress(0,text='A atualizar posições...')
+        for i,r in enumerate(inputs,1):
+            try:
+                qr=_portfolio_quick_row(r)
+                if qr: out.append(qr)
+            except Exception as e: out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
+            prog.progress(i/max(len(inputs),1),text=f'{i}/{len(inputs)}')
+        prog.empty(); st.session_state['v14_portfolio_rows']=out; st.session_state['portfolio_rows']=[{k:v for k,v in x.items() if k!='_analysis'} for x in out]; save_persistent_state(show_error=False); st.rerun()
+
+def _v31_render_positions(rows):
+    good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]
+    if not good: return
+    filters=['Todas','Manter','Reforçar','Aguardar','Rever']
+    f=st.segmented_control('Filtrar',filters,default='Todas',key='v31_pos_filter',label_visibility='collapsed') if hasattr(st,'segmented_control') else st.radio('Filtrar',filters,horizontal=True,key='v31_pos_filter')
+    selected=[]
+    for r in good:
+        bucket,color=_v31_decision_bucket(r.get('Decisão principal'))
+        if f=='Todas' or bucket==f: selected.append((r,bucket,color))
+    st.markdown(f'<div class="ci-panel"><div class="ci-panel-title">Posições ({len(good)})</div>',unsafe_allow_html=True)
+    for r,bucket,color in selected:
+        pnl=_safe_float(r.get('P/L EUR aprox.')); pnlpct=_safe_float(r.get('P/L %')); price=_safe_float(r.get('Preço atual'))
+        cls='ci-positive' if (pnl or 0)>=0 else 'ci-negative'
+        st.markdown(f'''<div class="ci-position"><div><div class="ci-pos-main">{html.escape(str(r.get('Ticker XTB') or ''))}</div><div class="ci-company">{html.escape(str(r.get('Empresa') or ''))}</div></div><div><div class="ci-muted">Preço</div><div>{price:.2f} {html.escape(str(r.get('Moeda') or '')) if price is not None else 'N/D'}</div></div><div><div class="ci-muted">Resultado</div><div class="{cls}">{_v31_money(pnl)}<br>{_v31_pct(pnlpct)}</div></div><div class="hide-mobile"><div class="ci-muted">Peso</div><div>{'N/D'}</div></div><div><span class="ci-pill {color}">{bucket}</span></div></div>''',unsafe_allow_html=True)
+    st.markdown('</div>',unsafe_allow_html=True)
+
 def _comparison_metric_card(label, ticker, note=''):
     st.metric(label,ticker or 'N/D')
     if note:
         st.caption(note)
 
-st.caption('Modo simples: a app mostra primeiro o que merece atenção e deixa o detalhe para quando o pedes.')
-TOP_PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Descobrir', 'Analisar'], horizontal=True, label_visibility='collapsed', key='main_page_v30')
+st.caption('Decisões claras primeiro. O detalhe fica disponível quando precisas.')
+TOP_PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Descobrir', 'Analisar'], horizontal=True, label_visibility='collapsed', key='main_page_v31', format_func=lambda x:{'Hoje':'⌂  Hoje','Carteira':'▣  Carteira','Descobrir':'◉  Descobrir','Analisar':'⌕  Analisar'}[x])
 PAGE = TOP_PAGE
 if TOP_PAGE == 'Carteira':
-    _carteira_view = st.radio('Carteira', ['Posições', 'Risco e alertas'], horizontal=True, label_visibility='collapsed', key='carteira_view_v30')
+    _carteira_view = st.radio('Carteira', ['Posições', 'Risco e alertas'], horizontal=True, label_visibility='collapsed', key='carteira_view_v31')
     PAGE = 'Carteira' if _carteira_view == 'Posições' else 'Risco'
 elif TOP_PAGE == 'Descobrir':
     PAGE = 'Comparar'
 elif TOP_PAGE == 'Analisar':
-    _analysis_view = st.radio('Analisar', ['Entrada com relatório', 'Ticker manual'], horizontal=True, label_visibility='collapsed', key='analysis_view_v30')
+    _analysis_view = st.radio('Analisar', ['Entrada com relatório', 'Ticker manual'], horizontal=True, label_visibility='collapsed', key='analysis_view_v31')
     PAGE = 'Relatório' if _analysis_view == 'Entrada com relatório' else 'Analisar'
 
 if PAGE == 'Hoje':
-    st.subheader('Dashboard de oportunidades')
-    st.markdown('<div class="section-note">Primeiro a decisão prática. O mesmo scan é organizado por entrada, valor relativo ao setor e oportunidades que pedem paciência.</div>', unsafe_allow_html=True)
-
-    c1,c2=st.columns([3,1])
-    with c1:
-        scan_markets=st.multiselect('Mercados',list(MARKETS.keys()),default=['EUA','Alemanha','Portugal'],key='v14_markets')
-    with c2:
-        scan_mode=st.selectbox('Pesquisa',['Rápida','Alargada'],index=0,key='v14_speed',help='Rápida analisa menos ativos e é a opção recomendada no telemóvel.')
-    only_type=st.selectbox('Tipo',['Todos','Ação','ETF','ETN'],index=0,key='v14_type')
-
-    if st.button('Atualizar oportunidades',type='primary',use_container_width=True,key='v14_scan'):
-        if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
-            load_persistent_state()
-        if not scan_markets:
-            st.error('Escolhe pelo menos um mercado.')
-        else:
-            rows=[]
-            universe=quick_universe(scan_markets,'Rápido' if scan_mode=='Rápida' else 'Alargado')
-            prog=st.progress(0,text='A analisar apenas o essencial...')
-            for i,t in enumerate(universe,1):
-                try:
-                    q=quick_candidate_row(t)
-                    if only_type=='Todos' or q['Tipo']==only_type:
-                        rows.append(q)
-                except Exception:
-                    pass
-                prog.progress(i/max(len(universe),1),text=f'{i}/{len(universe)}')
-            prog.empty()
-            rows=apply_peer_context(rows)
-            st.session_state['v14_scan_rows']=rows
-            st.session_state['v20_scan_time']=datetime.now().strftime('%d/%m/%Y %H:%M')
-
-    rows=st.session_state.get('v14_scan_rows',[])
-    if rows:
-        df=pd.DataFrame([{k:v for k,v in r.items() if k!='_analysis'} for r in rows])
-        sectors=sorted([x for x in df['Setor'].dropna().unique().tolist() if x and x!='N/D'])
-        chosen_sector=st.selectbox('Setor',['Todos']+sectors,key='v14_sector')
-        view=df if chosen_sector=='Todos' else df[df['Setor']==chosen_sector]
-        scan_time=st.session_state.get('v20_scan_time')
-        if scan_time:
-            st.caption(f'Última análise nesta sessão: {scan_time}. Os preços podem ser atrasados conforme a fonte.')
-
-        now,value,wait=_today_dashboard_groups(view)
-        m1,m2,m3,m4=st.columns(4)
-        m1.metric('Analisados',len(view))
-        m2.metric('Entrada agora',len(now))
-        m3.metric('Valor relativo',len(value))
-        m4.metric('Aguardar entrada',len(wait))
-
-        st.markdown('### 🟢 Oportunidades de entrada agora')
-        st.caption('Técnica permite entrada e o quadro de longo prazo não é fraco. Não é uma ordem de compra.')
-        if now.empty:
-            st.info('Nenhuma oportunidade passa estes filtros neste momento. AGUARDAR também é uma decisão válida.')
-        else:
-            for _,rr in now.head(5).iterrows():
-                rec=next((x for x in rows if x['Ticker']==rr['Ticker']),None)
-                if rec: _dashboard_card(rec,'agora')
-
-        st.markdown('### 💎 Possivelmente subvalorizadas vs. setor')
-        st.caption('Avaliação atrativa relativamente aos pares analisados do mesmo setor + qualidade suficiente. Isto não é um valor justo intrínseco.')
-        if value.empty:
-            st.info('Sem casos com comparação setorial suficientemente forte neste scan.')
-        else:
-            for _,rr in value.head(5).iterrows():
-                rec=next((x for x in rows if x['Ticker']==rr['Ticker']),None)
-                if rec: _dashboard_card(rec,'valor')
-
-        st.markdown('### 🟠 Boas empresas · aguardar melhor entrada')
-        st.caption('O longo prazo é interessante, mas o timing técnico não justifica perseguir o preço agora.')
-        if wait.empty:
-            st.info('Sem casos relevantes nesta categoria.')
-        else:
-            for _,rr in wait.head(5).iterrows():
-                rec=next((x for x in rows if x['Ticker']==rr['Ticker']),None)
-                if rec: _dashboard_card(rec,'espera')
-
-        short=view.sort_values('Score curto',ascending=False,na_position='last').head(10)
-        long=view.sort_values('Score longo',ascending=False,na_position='last').head(10)
-        with st.expander('Explorar rankings completos'):
-            hshort,hlong=st.tabs(['Top 10 curto prazo','Top 10 longo prazo'])
-            with hshort:
-                st.dataframe(_compact_table(short,'curto'),hide_index=True,use_container_width=True)
-            with hlong:
-                st.dataframe(_compact_table(long,'longo'),hide_index=True,use_container_width=True)
-
-        candidates=list(dict.fromkeys(now['Ticker'].tolist()+value['Ticker'].tolist()+wait['Ticker'].tolist()+short['Ticker'].tolist()+long['Ticker'].tolist()))
-        if candidates:
-            st.divider()
-            st.markdown('### Decidir sobre uma oportunidade')
-            pick=st.selectbox('Ativo',candidates,key='v14_pick')
-            rec=next((r for r in rows if r['Ticker']==pick),None)
-            if rec:
-                a=rec['_analysis']
-                cshort,clong=st.columns(2)
-                cshort.metric('Curto prazo',rec['Curto prazo'],f"{rec['Score curto']:.0f}/100")
-                clong.metric('Longo prazo',rec['Longo prazo'],f"{rec['Score longo']:.0f}/100" if rec['Score longo'] is not None else 'N/D')
-                with st.expander('Ver 3 evidências de cada horizonte'):
-                    e1,e2=st.columns(2)
-                    with e1:
-                        st.markdown('**Curto prazo**')
-                        for e in _short_evidence(a): st.write('• '+e)
-                    with e2:
-                        st.markdown('**Longo prazo**')
-                        for e in _long_evidence(a): st.write('• '+e)
-
-                with st.expander('Aceitar / rejeitar'):
-                    objective=st.selectbox('Objetivo',['Longo prazo','Curto prazo'],key='v14_obj')
-                    actual_qty=st.number_input('Quantidade efetivamente comprada',min_value=0.0,value=0.0,step=0.01,key='v14_qty')
-                    actual_entry=st.number_input('Preço efetivo',min_value=0.0,value=float(a['row']['Close']),step=0.01,key='v14_entry')
-                    b1,b2=st.columns(2)
-                    with b1:
-                        if st.button('✅ Aceitar',use_container_width=True,key='v14_accept'):
-                            if actual_qty<=0:
-                                st.error('Indica a quantidade efetivamente comprada.')
-                            else:
-                                log_decision(a,'ACEITE',actual_entry=actual_entry,actual_qty=actual_qty,objective=objective)
-                                add_or_merge_portfolio_position(a['xtb_ticker'],actual_qty,actual_entry,objective,0,'Oportunidade aceite',datetime.now().date(),'Aceite através do resumo de oportunidades',instrument_type=a.get('kind','Auto'),source_ticker=a.get('source_ticker',''))
-                                st.success('Adicionada à carteira.')
-                    with b2:
-                        if st.button('❌ Rejeitar e acompanhar',use_container_width=True,key='v14_reject'):
-                            log_decision(a,'REJEITADA',objective=objective)
-                            st.success('Guardada para comparação futura.')
-    else:
-        st.info('A dashboard está pronta. Carrega em **Atualizar oportunidades** para gerar a análise atual sem tornar o arranque da app lento.')
+    _v31_render_today()
 
 elif PAGE == 'Carteira':
-    st.subheader('Minha carteira')
+    st.markdown('<div class="ci-title">Carteira</div><div class="ci-subtitle">Posições, resultado e decisões num só lugar.</div>',unsafe_allow_html=True)
     if not st.session_state.get('_persistent_loaded'):
         with st.spinner('A carregar a carteira guardada...'):
             load_persistent_state()
@@ -4233,6 +4275,13 @@ A configuração antiga com `APP_PASSWORD` + `PORTFOLIO_OWNER_ID` continua compa
                 st.rerun()
             else:
                 st.error('A ligação continua indisponível. A app não gravou nem apagou a carteira remota.')
+
+    _v31_current_rows=_v31_rows()
+    if _v31_current_rows:
+        _v31_render_positions(_v31_current_rows)
+
+    with st.expander('Gestão da carteira · adicionar, importar e exportar', expanded=False):
+        st.caption('Mantemos estas ferramentas recolhidas para a página principal continuar simples.')
 
     st.caption('A pergunta principal aqui é simples: manter, reforçar, aguardar ou rever?')
 
@@ -4526,13 +4575,11 @@ elif PAGE == 'Risco':
 
 
 elif PAGE == 'Relatório':
-    st.subheader('Validar entrada com relatório InvestingPro')
-    st.caption('Objetivo: responder se a empresa é boa e se o preço atual oferece uma entrada interessante. O PDF sustenta os fundamentais; o mercado atual decide o timing.')
+    st.markdown('<div class="ci-title">Analisar ação</div><div class="ci-subtitle">Carrega o InvestingPro. A app valida se a empresa é boa e se o preço atual justifica entrada.</div>',unsafe_allow_html=True)
     if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
         load_persistent_state()
 
-    st.markdown('### 📄 Carrega o relatório mais recente')
-    st.caption('Seleciona o PDF do InvestingPro. A app identifica a empresa, atualiza o preço e mostra a decisão sem passos adicionais.')
+    st.markdown('<div class="ci-panel"><div class="ci-panel-title">▱ Carregar relatório InvestingPro (PDF)</div><div class="ci-muted">Seleciona o relatório mais recente. Ticker, empresa e data são identificados automaticamente.</div></div>',unsafe_allow_html=True)
     report_file=st.file_uploader('Relatório InvestingPro (PDF)',type=['pdf'],key='report_pdf_upload',label_visibility='collapsed')
 
     if report_file is not None:
@@ -4623,15 +4670,10 @@ elif PAGE == 'Relatório':
         q_label,q_note=_entry_quality_label(dec.get('fundamental'))
         v_label,v_note=_entry_valuation_label(dec.get('valuation'))
         t_label,t_note=_entry_technical_label(dec.get('technical'),zone.get('status'))
-        st.markdown('### Vale a pena entrar agora?')
-        e1,e2,e3,e4=st.columns(4)
-        e1.metric('Reforçar agora?' if holding else 'Nova entrada?',verdict)
-        e2.metric('Empresa',q_label)
-        e3.metric('Preço / valor',v_label)
-        e4.metric('Timing',t_label)
-        st.write(verdict_note)
         current=float(a['row']['Close'])
-        st.caption(f"Preço analisado: {current:.2f} {a['currency']} · zona técnica de referência: {zone['low']:.2f}-{zone['high']:.2f} {a['currency']} · {zone['status']}")
+        tone='green' if verdict in ['COMPRAR','REFORÇAR'] else ('red' if verdict in ['EVITAR','VENDER','REDUZIR'] else 'orange')
+        st.markdown(f'''<div class="ci-verdict"><div class="ci-verdict-action">{html.escape(verdict)}</div><div class="ci-verdict-text">{html.escape(verdict_note)}</div><div class="ci-triad"><div class="ci-mini"><div class="ci-mini-label">Empresa</div><div class="ci-mini-value good">{html.escape(q_label)}</div></div><div class="ci-mini"><div class="ci-mini-label">Preço</div><div class="ci-mini-value wait">{html.escape(v_label)}</div></div><div class="ci-mini"><div class="ci-mini-label">Timing</div><div class="ci-mini-value">{html.escape(t_label)}</div></div></div></div>''',unsafe_allow_html=True)
+        st.markdown(f'<div class="ci-panel"><div class="ci-panel-title">◎ Zona de interesse</div><div class="ci-kpi-value">{zone["low"]:.2f} – {zone["high"]:.2f} {a["currency"]}</div><div class="ci-muted">Preço analisado: {current:.2f} {a["currency"]} · {html.escape(str(zone["status"]))}</div></div>',unsafe_allow_html=True)
 
         st.caption('A confiança mede cobertura/qualidade dos dados; não é probabilidade de retorno nem de acerto da decisão.')
 
