@@ -12,12 +12,12 @@ import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title='Carteira Inteligente', page_icon='📊', layout='wide', initial_sidebar_state='collapsed')
+st.set_page_config(page_title='Gestor v33 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
 
 # -----------------------------------------------------------------------------
 # Autenticação multiutilizador
@@ -54,7 +54,7 @@ def _clear_user_session(clear_auth=False):
         '_persistent_loaded','v14_portfolio_rows','v14_hist_revalued','v14_port_detail_result',
         'comparison_df','comparison_time','v14_scan_rows','v20_scan_time','v14_analysis','v14_analysis_detail',
         'report_parsed','report_result','report_file_name','report_library','_report_last_upload_hash','v29_analysis_insiders',
-        'portfolio_snapshot','portfolio_snapshot_updated_at',
+        'portfolio_snapshot','portfolio_snapshot_updated_at','house_goal',
     }
     prefixes=('alert_','risk_','decision_stats_')
     for key in list(st.session_state.keys()):
@@ -114,7 +114,7 @@ if st.session_state.get('_app_authenticated'):
 
 st.markdown('''
 <div class="sy-topbar">
-  <div class="sy-wordmark"><span class="sy-mark">▰</span><span>Carteira Inteligente</span></div>
+  <div class="sy-wordmark"><span class="sy-mark">▥</span><span>Gestor <b>v33</b><small> · Casa 60k · B5b · 70/30</small></span></div>
   <div class="sy-account">''' + html.escape(str(st.session_state.get('_user_display') or '')) + '''</div>
 </div>
 ''', unsafe_allow_html=True)
@@ -266,6 +266,26 @@ if 'portfolio_snapshot_updated_at' not in st.session_state:
     st.session_state.portfolio_snapshot_updated_at = None
 
 # -----------------------------------------------------------------------------
+# Objetivo Casa 60k (v33)
+# -----------------------------------------------------------------------------
+def _default_house_goal():
+    today=date.today()
+    try:
+        target=today.replace(year=today.year+5)
+    except ValueError:
+        target=today.replace(month=2,day=28,year=today.year+5)
+    return {
+        'objetivo_eur':60000.0,'target_date':target.isoformat(),'horizonte_max_anos':6,
+        'cash_casa_eur':0.0,'emergencia_eur':800.0,'mensal_xtb':300.0,'mensal_tr':27.0,'mensal_cash_casa':200.0,
+        'alocacao_etf':0.70,'alocacao_acoes':0.30,'travão_revisao_posicao':-0.20,'travão_revisao_total':-0.40,
+        'max_acao':0.10,'max_setor':0.35,'max_acoes_semana':2,'max_acoes_mes':6,'max_reforcos_media':2,
+        'holding_min_acoes_dias':30,'holding_min_etf_dias':90,'retorno_planeamento':0.05,
+    }
+
+if 'house_goal' not in st.session_state:
+    st.session_state.house_goal=_default_house_goal()
+
+# -----------------------------------------------------------------------------
 # Persistência permanente (Supabase)
 # -----------------------------------------------------------------------------
 # A sessão do Streamlit é temporária. Quando estes 3 secrets existem, a carteira
@@ -367,6 +387,7 @@ def persistent_state_payload():
         'report_library':_json_safe(st.session_state.get('report_library',{})),
         'portfolio_snapshot':_json_safe(st.session_state.get('portfolio_snapshot',[])),
         'portfolio_snapshot_updated_at':_json_safe(st.session_state.get('portfolio_snapshot_updated_at')),
+        'house_goal':_json_safe(st.session_state.get('house_goal',_default_house_goal())),
     }
 
 def save_persistent_state(show_error=False):
@@ -428,6 +449,7 @@ def load_persistent_state(force=False, fast=False):
             st.session_state.report_library=dict(state.get('report_library') or {})
             st.session_state.portfolio_snapshot=list(state.get('portfolio_snapshot') or [])
             st.session_state.portfolio_snapshot_updated_at=state.get('portfolio_snapshot_updated_at')
+            st.session_state.house_goal={**_default_house_goal(), **dict(state.get('house_goal') or {})}
             if st.session_state.portfolio_snapshot:
                 st.session_state['portfolio_rows']=list(st.session_state.portfolio_snapshot)
                 st.session_state['v14_portfolio_rows']=list(st.session_state.portfolio_snapshot)
@@ -443,6 +465,7 @@ def load_persistent_state(force=False, fast=False):
             st.session_state.report_library={}
             st.session_state.portfolio_snapshot=[]
             st.session_state.portfolio_snapshot_updated_at=None
+            st.session_state.house_goal=_default_house_goal()
         st.session_state['_persistent_loaded']=True
         st.session_state['_persistence_read_ok']=True
         st.session_state['persistence_status']='Ligado'
@@ -1774,6 +1797,8 @@ def add_or_merge_portfolio_position(ticker, qty, entry_price, objective='Longo p
     q=float(qty)
     ep=float(entry_price)
     inst=_normalize_instrument_type(instrument_type)
+    if inst=='CFD':
+        raise ValueError('O mandato Casa 60k não permite adicionar CFDs à carteira.')
     src=str(source_ticker or '').upper().strip()
     mult=_safe_float(contract_multiplier) or 0.0
     if not t or q<=0 or ep<=0:
@@ -3804,63 +3829,79 @@ def decision_performance_standardized():
 
 
 # -----------------------------------------------------------------------------
-# Interface Sharpyield-like (v32) - Streamlit, mobile-first
+# Interface Gestor v33 - referência visual: protótipo Casa 60k / Sharpyield-like
 # -----------------------------------------------------------------------------
 st.markdown('''
 <style>
 :root{
-  --sy-ink:#0c1d3a; --sy-muted:#687386; --sy-green:#18a66a; --sy-green2:#e8f8f0;
-  --sy-red:#d9485f; --sy-orange:#d98019; --sy-blue:#2867d8;
-  --sy-line:#e9edf2; --sy-card:#ffffff; --sy-soft:#f7f8fa; --sy-warm:#fbfaf7;
-  --sy-shadow:0 8px 26px rgba(12,29,58,.055);
+  --sy-bg:#07101c; --sy-bg2:#0a1422; --sy-panel:#0e1928; --sy-panel2:#111f31;
+  --sy-ink:#f4f7fb; --sy-muted:#91a0b4; --sy-green:#2fe17a; --sy-green2:#112c22;
+  --sy-red:#ff6478; --sy-orange:#ffb447; --sy-blue:#4d9cff; --sy-cyan:#35d6d0;
+  --sy-line:#203147; --sy-soft:#152338; --sy-warm:#07101c;
+  --sy-shadow:0 16px 42px rgba(0,0,0,.23);
 }
-html,body,[data-testid="stAppViewContainer"],.stApp{background:var(--sy-warm)!important;color:var(--sy-ink)!important;}
-header[data-testid="stHeader"]{background:rgba(251,250,247,.94)!important;backdrop-filter:blur(10px);}
+html,body,[data-testid="stAppViewContainer"],.stApp{background:radial-gradient(circle at 74% 3%,#0c1b2c 0,#07101c 34%,#07101c 100%)!important;color:var(--sy-ink)!important;}
+header[data-testid="stHeader"]{background:rgba(7,16,28,.88)!important;backdrop-filter:blur(12px);}
 #MainMenu,footer{visibility:hidden;}
-.block-container{max-width:1180px;padding-top:.45rem;padding-bottom:5.5rem;padding-left:220px!important;padding-right:1.15rem!important;}
+.block-container{max-width:1500px;padding-top:.35rem;padding-bottom:5.5rem;padding-left:258px!important;padding-right:1rem!important;}
 .stApp .stMarkdown,.stApp .stMarkdown p,.stApp .stMarkdown li,.stApp [data-testid="stWidgetLabel"] p,
-.stApp .stCaptionContainer p,.stApp label,.stApp [data-testid="stExpander"] summary{color:var(--sy-ink)!important;}
-.stApp input,.stApp textarea{color:var(--sy-ink)!important;background:#fff!important;}
-.stApp [data-baseweb="select"]>div{background:#fff!important;color:var(--sy-ink)!important;border-color:var(--sy-line)!important;}
-.stApp button{font-family:inherit;}.stApp button *{color:inherit!important;}
-.stApp button[kind="primary"]{background:var(--sy-ink)!important;border-color:var(--sy-ink)!important;color:#fff!important;}
-.stApp button[kind="secondary"]{background:#fff!important;border-color:#dce2ea!important;color:var(--sy-ink)!important;}
-[data-testid="stSidebar"]{background:#fff;border-right:1px solid var(--sy-line);}
-.sy-topbar{display:flex;align-items:center;justify-content:space-between;height:54px;margin-bottom:.45rem;border-bottom:1px solid var(--sy-line);}
-.sy-wordmark{display:flex;gap:.55rem;align-items:center;font-weight:850;font-size:1rem;letter-spacing:-.02em;color:var(--sy-ink);}
-.sy-mark{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:9px;background:var(--sy-green);color:white;font-size:.78rem;transform:rotate(-8deg);}
-.sy-account{font-size:.78rem;color:var(--sy-muted);}
-.sy-page-title{font-size:1.72rem;font-weight:860;letter-spacing:-.045em;color:var(--sy-ink);line-height:1.05;margin:.4rem 0 .15rem;}
-.sy-page-sub{color:var(--sy-muted);font-size:.9rem;margin-bottom:.9rem;}
+.stApp .stCaptionContainer p,.stApp label,.stApp [data-testid="stExpander"] summary,.stApp h1,.stApp h2,.stApp h3,.stApp h4{color:var(--sy-ink)!important;}
+.stApp [data-testid="stCaptionContainer"] p,.stApp small{color:var(--sy-muted)!important;}
+.stApp input,.stApp textarea{color:var(--sy-ink)!important;background:#0d1928!important;border-color:var(--sy-line)!important;}
+.stApp [data-baseweb="select"]>div,.stApp [data-baseweb="base-input"]{background:#0d1928!important;color:var(--sy-ink)!important;border-color:var(--sy-line)!important;}
+.stApp [data-baseweb="select"] span,.stApp [data-baseweb="popover"] *{color:var(--sy-ink)!important;}
+.stApp button{font-family:inherit;color:var(--sy-ink)!important;}.stApp button *{color:inherit!important;}
+.stApp button[kind="primary"]{background:linear-gradient(135deg,#159d57,#1bcf70)!important;border-color:#22c96e!important;color:#07150e!important;font-weight:850!important;}
+.stApp button[kind="secondary"]{background:#101e30!important;border-color:#2a3d55!important;color:var(--sy-ink)!important;}
+[data-testid="stSidebar"]{background:#081321!important;border-right:1px solid var(--sy-line)!important;}
+[data-testid="stSidebar"] *{color:var(--sy-ink)!important;}
+.sy-topbar{display:flex;align-items:center;justify-content:space-between;height:58px;margin-bottom:.4rem;border-bottom:1px solid var(--sy-line);}
+.sy-wordmark{display:flex;gap:.58rem;align-items:center;font-weight:870;font-size:1.04rem;letter-spacing:-.02em;color:var(--sy-ink);}.sy-wordmark b{color:var(--sy-green)}.sy-wordmark small{font-size:.68rem;font-weight:650;color:var(--sy-muted)!important;}
+.sy-mark{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:9px;background:#173123;color:var(--sy-green);font-size:.85rem;border:1px solid #25543a;}
+.sy-account{font-size:.75rem;color:var(--sy-muted);}
+.sy-page-title{font-size:1.72rem;font-weight:880;letter-spacing:-.045em;color:var(--sy-ink);line-height:1.05;margin:.35rem 0 .15rem;}.sy-page-sub{color:var(--sy-muted);font-size:.86rem;margin-bottom:.85rem;}
 
-div[data-testid="stRadio"]:has(input[value="Hoje"]){position:fixed;left:16px;top:78px;width:182px;z-index:100;background:#fff;border:1px solid var(--sy-line);border-radius:20px;padding:.55rem;box-shadow:var(--sy-shadow);}
-div[data-testid="stRadio"]:has(input[value="Hoje"]) div[role="radiogroup"]{display:flex;flex-direction:column;gap:.15rem;background:transparent!important;padding:0!important;}
-div[data-testid="stRadio"]:has(input[value="Hoje"]) label{width:100%;padding:.65rem .68rem!important;border-radius:12px;color:var(--sy-ink)!important;}
-div[data-testid="stRadio"]:has(input[value="Hoje"]) label p{font-weight:720!important;font-size:.86rem!important;color:var(--sy-ink)!important;}
-div[data-testid="stRadio"]:has(input[value="Hoje"]) label:has(input:checked){background:#eef8f3!important;}
-div[data-testid="stRadio"]:has(input[value="Hoje"]) label:has(input:checked) p{color:#0d7c4e!important;}
-div[data-testid="stRadio"]:not(:has(input[value="Hoje"])) div[role="radiogroup"]{gap:.25rem;background:#f0f2f5;border-radius:13px;padding:.22rem;}
-div[data-testid="stRadio"]:not(:has(input[value="Hoje"])) label{border-radius:10px;padding:.4rem .65rem;color:var(--sy-ink)!important;}
-div[data-testid="stRadio"]:not(:has(input[value="Hoje"])) label p{color:var(--sy-ink)!important;font-weight:650;}
+div[data-testid="stRadio"]:has(input[value="Hoje"]){position:fixed;left:12px;top:76px;width:224px;z-index:100;background:#0a1524;border:1px solid var(--sy-line);border-radius:15px;padding:.48rem;box-shadow:var(--sy-shadow);}
+div[data-testid="stRadio"]:has(input[value="Hoje"]) div[role="radiogroup"]{display:flex;flex-direction:column;gap:.16rem;background:transparent!important;padding:0!important;}
+div[data-testid="stRadio"]:has(input[value="Hoje"]) label{width:100%;padding:.69rem .7rem!important;border-radius:10px;color:var(--sy-ink)!important;}
+div[data-testid="stRadio"]:has(input[value="Hoje"]) label p{font-weight:760!important;font-size:.84rem!important;color:var(--sy-ink)!important;}
+div[data-testid="stRadio"]:has(input[value="Hoje"]) label:has(input:checked){background:linear-gradient(90deg,#123d28,#0f2c22)!important;border:1px solid #1d5d3b;}
+div[data-testid="stRadio"]:has(input[value="Hoje"]) label:has(input:checked) p{color:#74f2a6!important;}
+div[data-testid="stRadio"]:not(:has(input[value="Hoje"])) div[role="radiogroup"]{gap:.2rem;background:#0d1a2a;border:1px solid var(--sy-line);border-radius:11px;padding:.2rem;}
+div[data-testid="stRadio"]:not(:has(input[value="Hoje"])) label{border-radius:8px;padding:.38rem .58rem;color:var(--sy-ink)!important;}
+div[data-testid="stRadio"]:not(:has(input[value="Hoje"])) label p{color:var(--sy-ink)!important;font-weight:680;}
 
-.sy-hero{background:linear-gradient(145deg,#ffffff,#fbfdfc);border:1px solid var(--sy-line);border-radius:22px;padding:1.15rem 1.2rem;box-shadow:var(--sy-shadow);margin:.45rem 0 .85rem;}
-.sy-hero-top{display:flex;justify-content:space-between;gap:.7rem;align-items:flex-start;}.sy-eyebrow{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;font-weight:800;color:var(--sy-muted);}
-.sy-value{font-size:2.15rem;font-weight:880;letter-spacing:-.055em;color:var(--sy-ink);line-height:1.05;margin:.18rem 0;}.sy-today{display:flex;gap:.45rem;align-items:center;font-weight:800;font-size:.9rem;}.sy-today.pos{color:var(--sy-green)}.sy-today.neg{color:var(--sy-red)}.sy-today.na{color:var(--sy-muted)}
-.sy-live{display:inline-flex;align-items:center;gap:.35rem;padding:.28rem .5rem;border-radius:999px;background:#f3f5f7;color:var(--sy-muted);font-size:.7rem;font-weight:700;white-space:nowrap;}.sy-dot{width:7px;height:7px;border-radius:50%;background:var(--sy-green);display:inline-block;}
-.sy-hero-meta{display:flex;flex-wrap:wrap;gap:.85rem;margin-top:.9rem;padding-top:.8rem;border-top:1px solid var(--sy-line);}.sy-hero-meta>div{min-width:110px}.sy-meta-label{font-size:.7rem;color:var(--sy-muted)}.sy-meta-val{font-size:.92rem;font-weight:800;color:var(--sy-ink);margin-top:.1rem}
-.sy-grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.65rem;margin:.65rem 0 .85rem;}.sy-stat{background:#fff;border:1px solid var(--sy-line);border-radius:17px;padding:.82rem .9rem;box-shadow:0 4px 14px rgba(12,29,58,.03);}.sy-stat-label{font-size:.72rem;color:var(--sy-muted)}.sy-stat-value{font-size:1.12rem;font-weight:850;color:var(--sy-ink);margin-top:.16rem}.sy-stat-note{font-size:.68rem;color:var(--sy-muted);margin-top:.16rem}
-.sy-card{background:#fff;border:1px solid var(--sy-line);border-radius:20px;padding:1rem 1.05rem;box-shadow:var(--sy-shadow);margin:.7rem 0;}.sy-card-head{display:flex;align-items:center;justify-content:space-between;gap:.6rem;margin-bottom:.55rem}.sy-card-title{font-size:.98rem;font-weight:830;color:var(--sy-ink)}.sy-card-sub{font-size:.72rem;color:var(--sy-muted)}
-.sy-pos-row{display:grid;grid-template-columns:minmax(180px,1.55fr) .75fr .72fr .78fr;gap:.55rem;align-items:center;padding:.72rem 0;border-top:1px solid #f0f2f4;}.sy-pos-row:first-child{border-top:0}.sy-asset{display:flex;gap:.62rem;align-items:center;min-width:0}.sy-avatar{width:34px;height:34px;border-radius:11px;background:#eef3f7;color:var(--sy-ink);display:grid;place-items:center;font-size:.68rem;font-weight:900;flex:none}.sy-asset-txt{min-width:0}.sy-ticker{font-weight:850;color:var(--sy-ink);font-size:.88rem}.sy-company{font-size:.72rem;color:var(--sy-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sy-label{font-size:.66rem;color:var(--sy-muted)}.sy-num{font-size:.84rem;font-weight:760;color:var(--sy-ink)}.sy-pos{color:var(--sy-green)!important}.sy-neg{color:var(--sy-red)!important}.sy-na{color:var(--sy-muted)!important}
-.sy-badge{display:inline-block;padding:.24rem .48rem;border-radius:999px;font-size:.68rem;font-weight:800;white-space:nowrap}.sy-badge.green{background:#e7f7ee;color:#118052}.sy-badge.blue{background:#eaf1fd;color:#235cc0}.sy-badge.orange{background:#fff1df;color:#b96308}.sy-badge.red{background:#feecef;color:#bd3048}.sy-badge.gray{background:#f0f2f5;color:#687386}
-.sy-bar-row{margin:.55rem 0}.sy-bar-top{display:flex;justify-content:space-between;font-size:.75rem;color:var(--sy-ink);margin-bottom:.23rem}.sy-track{height:7px;border-radius:99px;background:#edf0f3;overflow:hidden}.sy-fill{height:100%;border-radius:99px;background:var(--sy-ink)}
-.sy-attn{display:flex;gap:.65rem;align-items:flex-start;padding:.62rem 0;border-top:1px solid #f0f2f4}.sy-attn:first-child{border-top:0}.sy-attn-icon{width:28px;height:28px;border-radius:9px;background:#f4f6f8;display:grid;place-items:center;flex:none}.sy-attn-main{flex:1;min-width:0}.sy-attn-title{font-size:.82rem;font-weight:800;color:var(--sy-ink)}.sy-attn-text{font-size:.72rem;color:var(--sy-muted);line-height:1.35;margin-top:.05rem}.sy-empty{padding:1.4rem;text-align:center;background:#fff;border:1px solid var(--sy-line);border-radius:20px;color:var(--sy-muted)}
-.ci-title,.sy-analysis-title{font-size:1.72rem;font-weight:860;letter-spacing:-.04em;color:var(--sy-ink);margin:.35rem 0 .15rem}.ci-subtitle{color:var(--sy-muted);font-size:.9rem;margin-bottom:.9rem}.ci-panel,.asset-card{background:#fff!important;border:1px solid var(--sy-line)!important;border-radius:20px!important;box-shadow:var(--sy-shadow)!important;padding:1rem 1.05rem!important}.ci-panel-title,.asset-title{color:var(--sy-ink)!important}.ci-muted,.asset-sub,.score,.section-note{color:var(--sy-muted)!important}.ci-verdict{border:1px solid #f0dfc9;background:#fffaf3;border-radius:20px;padding:1rem 1.05rem}.ci-verdict-action{font-size:1.65rem;font-weight:900;color:#b96308}.ci-verdict-text{color:#344054}.ci-triad{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem}.ci-mini{background:#fff;border:1px solid #efe7dd;border-radius:14px;padding:.62rem;text-align:center}.ci-mini-label{font-size:.68rem;color:var(--sy-muted)}.ci-mini-value{font-weight:850;color:var(--sy-ink)}
-[data-testid="stMetric"]{background:#fff;border:1px solid var(--sy-line);border-radius:17px;padding:.7rem .8rem;box-shadow:0 4px 14px rgba(12,29,58,.03)}[data-testid="stFileUploader"]{background:#fff;border:1px dashed #cbd3dd;border-radius:18px;padding:.25rem}[data-testid="stExpander"]{background:#fff;border:1px solid var(--sy-line);border-radius:16px!important;overflow:hidden}[data-testid="stDataFrame"]{border:1px solid var(--sy-line);border-radius:15px;overflow:hidden}.stButton>button{border-radius:13px!important;min-height:2.65rem;font-weight:720}
-@media(max-width:760px){.block-container{padding-left:.72rem!important;padding-right:.72rem!important;padding-top:.2rem!important;padding-bottom:6.4rem!important}.sy-topbar{height:48px;position:sticky;top:0;z-index:98;background:rgba(251,250,247,.96);backdrop-filter:blur(9px)}.sy-account{display:none}.sy-page-title,.ci-title{font-size:1.48rem}.sy-value{font-size:1.95rem}.sy-grid-3{grid-template-columns:1fr 1fr}.sy-grid-3 .sy-stat:last-child{grid-column:1/-1}.sy-hero{padding:1rem}.sy-hero-meta{gap:.65rem}.sy-pos-row{grid-template-columns:minmax(150px,1.3fr) .75fr .72fr}.sy-pos-row .sy-hide-mobile{display:none}.ci-triad{grid-template-columns:repeat(3,1fr)}div[data-testid="stRadio"]:has(input[value="Hoje"]){left:.55rem;right:.55rem;top:auto;bottom:.45rem;width:auto;padding:.25rem .32rem;border-radius:19px;box-shadow:0 10px 30px rgba(12,29,58,.17)}div[data-testid="stRadio"]:has(input[value="Hoje"]) div[role="radiogroup"]{display:grid;grid-template-columns:repeat(4,1fr);gap:.05rem}div[data-testid="stRadio"]:has(input[value="Hoje"]) label{padding:.48rem .12rem!important;justify-content:center;text-align:center}div[data-testid="stRadio"]:has(input[value="Hoje"]) label p{font-size:.7rem!important;white-space:nowrap}}
+.sy-hero,.sy-card,.ci-panel,.asset-card{background:linear-gradient(145deg,#0f1b2b,#0b1726)!important;border:1px solid var(--sy-line)!important;border-radius:14px!important;box-shadow:var(--sy-shadow)!important;}
+.sy-hero{padding:1rem 1.08rem;margin:.4rem 0 .75rem;}.sy-hero-top{display:flex;justify-content:space-between;gap:.7rem;align-items:flex-start;}.sy-eyebrow{font-size:.69rem;letter-spacing:.08em;text-transform:uppercase;font-weight:820;color:var(--sy-muted);}.sy-value{font-size:2.05rem;font-weight:900;letter-spacing:-.055em;color:var(--sy-ink);line-height:1.04;margin:.15rem 0;}.sy-today{display:flex;gap:.4rem;align-items:center;font-weight:820;font-size:.84rem;}.sy-today.pos{color:var(--sy-green)}.sy-today.neg{color:var(--sy-red)}.sy-today.na{color:var(--sy-muted)}
+.sy-live{display:inline-flex;align-items:center;gap:.35rem;padding:.28rem .5rem;border-radius:999px;background:#101f31;color:var(--sy-muted);font-size:.68rem;font-weight:720;white-space:nowrap;border:1px solid var(--sy-line);}.sy-dot{width:7px;height:7px;border-radius:50%;background:var(--sy-green);display:inline-block;box-shadow:0 0 10px #2fe17a;}
+.sy-hero-meta{display:flex;flex-wrap:wrap;gap:.8rem;margin-top:.82rem;padding-top:.72rem;border-top:1px solid var(--sy-line);}.sy-hero-meta>div{min-width:105px}.sy-meta-label{font-size:.67rem;color:var(--sy-muted)}.sy-meta-val{font-size:.9rem;font-weight:820;color:var(--sy-ink);margin-top:.08rem}
+.sy-grid-3,.g33-kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.58rem;margin:.58rem 0 .72rem;}.sy-stat,.g33-kpi{background:linear-gradient(145deg,#101d2d,#0b1726);border:1px solid var(--sy-line);border-radius:12px;padding:.78rem .85rem;}.sy-stat-label,.g33-label{font-size:.68rem;color:var(--sy-muted)}.sy-stat-value,.g33-kpi-value{font-size:1.08rem;font-weight:880;color:var(--sy-ink);margin-top:.12rem}.sy-stat-note,.g33-note{font-size:.65rem;color:var(--sy-muted);margin-top:.13rem}.g33-positive{color:var(--sy-green)!important}.g33-negative{color:var(--sy-red)!important}.g33-warn{color:var(--sy-orange)!important}
+.sy-card{padding:.9rem .95rem;margin:.62rem 0;}.sy-card-head{display:flex;align-items:center;justify-content:space-between;gap:.6rem;margin-bottom:.48rem}.sy-card-title{font-size:.93rem;font-weight:840;color:var(--sy-ink)}.sy-card-sub{font-size:.68rem;color:var(--sy-muted)}
+.sy-pos-row{display:grid;grid-template-columns:minmax(180px,1.45fr) .72fr .70fr .75fr;gap:.52rem;align-items:center;padding:.67rem 0;border-top:1px solid #1c2b3f;}.sy-pos-row:first-child{border-top:0}.sy-asset{display:flex;gap:.58rem;align-items:center;min-width:0}.sy-avatar{width:33px;height:33px;border-radius:9px;background:#15263a;color:#d9e9ff;display:grid;place-items:center;font-size:.66rem;font-weight:900;flex:none;border:1px solid #263a53}.sy-asset-txt{min-width:0}.sy-ticker{font-weight:860;color:var(--sy-ink);font-size:.84rem}.sy-company{font-size:.68rem;color:var(--sy-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sy-label{font-size:.63rem;color:var(--sy-muted)}.sy-num{font-size:.81rem;font-weight:760;color:var(--sy-ink)}.sy-pos{color:var(--sy-green)!important}.sy-neg{color:var(--sy-red)!important}.sy-na{color:var(--sy-muted)!important}
+.sy-badge{display:inline-block;padding:.21rem .42rem;border-radius:7px;font-size:.63rem;font-weight:820;white-space:nowrap}.sy-badge.green{background:#123022;color:#64eda0}.sy-badge.blue{background:#142b4e;color:#72acff}.sy-badge.orange{background:#352714;color:#ffc56b}.sy-badge.red{background:#3a1821;color:#ff8292}.sy-badge.gray{background:#1a2737;color:#a8b6c9}
+.sy-bar-row{margin:.5rem 0}.sy-bar-top{display:flex;justify-content:space-between;font-size:.71rem;color:var(--sy-ink);margin-bottom:.21rem}.sy-track{height:7px;border-radius:99px;background:#18283a;overflow:hidden}.sy-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#2f8cff,#36d6d1)}
+.sy-attn{display:flex;gap:.58rem;align-items:flex-start;padding:.57rem 0;border-top:1px solid #1c2b3f}.sy-attn:first-child{border-top:0}.sy-attn-icon{width:27px;height:27px;border-radius:8px;background:#142338;display:grid;place-items:center;flex:none;color:var(--sy-green)}.sy-attn-main{flex:1;min-width:0}.sy-attn-title{font-size:.78rem;font-weight:820;color:var(--sy-ink)}.sy-attn-text{font-size:.68rem;color:var(--sy-muted);line-height:1.35;margin-top:.04rem}.sy-empty{padding:1.3rem;text-align:center;background:#0e1928;border:1px solid var(--sy-line);border-radius:14px;color:var(--sy-muted)}
+
+.g33-goal-progress{height:10px;border-radius:99px;background:#172638;overflow:hidden;margin:.42rem 0 .7rem}.g33-goal-fill{height:100%;background:linear-gradient(90deg,#33ed7c,#7af291);border-radius:99px}.g33-goal-row{display:flex;justify-content:space-between;align-items:center;padding:.42rem 0;border-top:1px solid #1b2b3f;font-size:.72rem}.g33-goal-row span{color:var(--sy-muted)}.g33-goal-row strong{color:var(--sy-ink)}
+.g33-donut-wrap{display:flex;align-items:center;gap:1.05rem;padding:.55rem 0}.g33-donut{width:118px;height:118px;border-radius:50%;display:grid;place-items:center;position:relative;flex:none}.g33-donut:after{content:'';width:76px;height:76px;background:#0e1928;border-radius:50%;position:absolute;border:1px solid #1f3045}.g33-donut-center{z-index:2;text-align:center}.g33-donut-center strong{font-size:1.25rem;color:var(--sy-ink)}.g33-donut-center small{display:block;font-size:.62rem;color:var(--sy-muted)!important}.g33-legend{flex:1}.g33-legend-row{display:flex;justify-content:space-between;gap:.5rem;font-size:.72rem;margin:.38rem 0}.g33-legend-row span{color:var(--sy-muted)}.g33-legend-row strong{color:var(--sy-ink)}
+.g33-alert{display:flex;gap:.55rem;padding:.42rem 0;align-items:flex-start}.g33-alert-dot{width:20px;height:20px;border-radius:7px;background:#123022;color:var(--sy-green);display:grid;place-items:center;font-size:.68rem;font-weight:900;flex:none}.g33-alert.warn .g33-alert-dot{background:#382815;color:var(--sy-orange)}.g33-alert.bad .g33-alert-dot{background:#3b1922;color:var(--sy-red)}.g33-alert-text{font-size:.72rem;line-height:1.35;color:#d9e2ee}.g33-limit-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.45rem}.g33-limit{background:#0b1726;border:1px solid var(--sy-line);border-radius:10px;padding:.58rem}.g33-limit span{display:block;font-size:.62rem;color:var(--sy-muted)}.g33-limit strong{display:block;font-size:.82rem;color:var(--sy-ink);margin-top:.12rem}.g33-milestones{display:flex;gap:.25rem;align-items:flex-start;justify-content:space-between;margin-top:.65rem}.g33-mile{flex:1;text-align:center;position:relative;font-size:.58rem;color:var(--sy-muted)}.g33-mile:before{content:'';display:block;width:9px;height:9px;border-radius:50%;background:#33465e;margin:0 auto .25rem}.g33-mile.done:before{background:var(--sy-green);box-shadow:0 0 10px rgba(47,225,122,.45)}.g33-mile.done{color:var(--sy-green)}
+.g33-action{background:linear-gradient(135deg,#0f2530,#0c1c2a);border:1px solid #244259;border-radius:12px;padding:.8rem .85rem}.g33-action-title{font-size:.66rem;color:var(--sy-muted);text-transform:uppercase;letter-spacing:.08em}.g33-action-main{font-size:1rem;font-weight:880;color:var(--sy-ink);margin:.18rem 0}.g33-action-note{font-size:.7rem;color:#b6c2d2;line-height:1.4}
+.g33-table{width:100%;border-collapse:collapse;font-size:.69rem}.g33-table th{text-align:left;color:var(--sy-muted);font-weight:700;padding:.38rem .3rem;border-bottom:1px solid var(--sy-line)}.g33-table td{padding:.42rem .3rem;border-bottom:1px solid #1b2a3e;color:#dce5f0}.g33-table td.good{color:var(--sy-green)}.g33-table td.bad{color:var(--sy-red)}
+
+.ci-title,.sy-analysis-title{font-size:1.7rem;font-weight:880;letter-spacing:-.04em;color:var(--sy-ink);margin:.35rem 0 .15rem}.ci-subtitle{color:var(--sy-muted);font-size:.86rem;margin-bottom:.8rem}.ci-panel,.asset-card{padding:.9rem .95rem!important}.ci-panel-title,.asset-title{color:var(--sy-ink)!important}.ci-muted,.asset-sub,.score,.section-note{color:var(--sy-muted)!important}.ci-verdict{border:1px solid #3d3020;background:#191b18;border-radius:14px;padding:.9rem .95rem}.ci-verdict-action{font-size:1.55rem;font-weight:900;color:var(--sy-orange)}.ci-verdict-text{color:#d0d9e4}.ci-triad{display:grid;grid-template-columns:repeat(3,1fr);gap:.45rem}.ci-mini{background:#0d1928;border:1px solid var(--sy-line);border-radius:10px;padding:.58rem;text-align:center}.ci-mini-label{font-size:.63rem;color:var(--sy-muted)}.ci-mini-value{font-weight:850;color:var(--sy-ink)}
+[data-testid="stMetric"]{background:#0f1b2b;border:1px solid var(--sy-line);border-radius:12px;padding:.65rem .72rem;box-shadow:none}[data-testid="stMetric"] *{color:var(--sy-ink)!important}[data-testid="stMetricDelta"] *{color:inherit!important}[data-testid="stFileUploader"]{background:#0d1928;border:1px dashed #36506d;border-radius:12px;padding:.22rem}[data-testid="stExpander"]{background:#0d1928;border:1px solid var(--sy-line);border-radius:11px!important;overflow:hidden}[data-testid="stDataFrame"]{border:1px solid var(--sy-line);border-radius:11px;overflow:hidden}.stButton>button{border-radius:10px!important;min-height:2.5rem;font-weight:740}
+[data-testid="stProgress"]>div>div>div{background:var(--sy-green)!important}.stAlert{background:#0e1b2b!important;border-color:#263d56!important;color:var(--sy-ink)!important}.stAlert *{color:var(--sy-ink)!important;}
+
+@media(max-width:900px){.g33-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.g33-limit-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){
+  .block-container{padding-left:.68rem!important;padding-right:.68rem!important;padding-top:.15rem!important;padding-bottom:6.3rem!important}.sy-topbar{height:48px;position:sticky;top:0;z-index:98;background:rgba(7,16,28,.96);backdrop-filter:blur(10px)}.sy-account,.sy-wordmark small{display:none}.sy-page-title,.ci-title{font-size:1.43rem}.sy-value{font-size:1.85rem}.sy-grid-3{grid-template-columns:1fr 1fr}.sy-grid-3 .sy-stat:last-child{grid-column:auto}.g33-kpi-grid{grid-template-columns:1fr 1fr}.sy-hero{padding:.9rem}.sy-hero-meta{gap:.58rem}.sy-pos-row{grid-template-columns:minmax(145px,1.25fr) .7fr .7fr}.sy-pos-row .sy-hide-mobile{display:none}.ci-triad{grid-template-columns:repeat(3,1fr)}.g33-donut{width:102px;height:102px}.g33-donut:after{width:66px;height:66px}.g33-limit-grid{grid-template-columns:1fr 1fr}.g33-milestones{overflow-x:auto;justify-content:flex-start}.g33-mile{min-width:56px}
+  div[data-testid="stRadio"]:has(input[value="Hoje"]){left:.45rem;right:.45rem;top:auto;bottom:.38rem;width:auto;padding:.22rem .26rem;border-radius:15px;background:rgba(8,19,33,.98)}
+  div[data-testid="stRadio"]:has(input[value="Hoje"]) div[role="radiogroup"]{display:grid;grid-template-columns:repeat(5,1fr);gap:.03rem}
+  div[data-testid="stRadio"]:has(input[value="Hoje"]) label{padding:.45rem .05rem!important;justify-content:center;text-align:center}
+  div[data-testid="stRadio"]:has(input[value="Hoje"]) label p{font-size:.61rem!important;white-space:nowrap}
+}
 </style>
-''', unsafe_allow_html=True)
-
-
+''',unsafe_allow_html=True)
 def _action_css(action):
     a=str(action).upper()
     if any(x in a for x in ['CANDIDATO','REFORÇO','MANTER']): return 'good'
@@ -4222,40 +4263,240 @@ def _v32_storage_controls():
         if status=='Apenas sessão':
             st.caption('Configuração: SUPABASE_URL e SUPABASE_SECRET_KEY nos Secrets do Streamlit. As credenciais nunca devem ficar no GitHub.')
 
+def _house_cfg():
+    cfg=_default_house_goal()
+    raw=st.session_state.get('house_goal') or {}
+    if isinstance(raw,dict): cfg.update(raw)
+    return cfg
+
+def _house_money(v,decimals=0):
+    x=_safe_float(v)
+    if x is None: return 'N/D'
+    fmt=f"{x:,.{decimals}f} €"
+    return fmt.replace(',', 'X').replace('.', ',').replace('X','.')
+
+def _house_pct_ratio(v):
+    x=_safe_float(v)
+    if x is None: return 'N/D'
+    return f"{x*100:.1f}%".replace('.',',')
+
+def _house_target_date(cfg=None):
+    cfg=cfg or _house_cfg()
+    try: return datetime.fromisoformat(str(cfg.get('target_date'))).date()
+    except Exception:
+        today=date.today()
+        try: return today.replace(year=today.year+5)
+        except ValueError: return today.replace(month=2,day=28,year=today.year+5)
+
+def _house_months_left(cfg=None):
+    target=_house_target_date(cfg); today=date.today()
+    if target<=today: return 0
+    months=(target.year-today.year)*12+(target.month-today.month)
+    if target.day<today.day: months-=1
+    return max(0,months)
+
+def _house_fv(pv,pmt,annual,months):
+    pv=float(pv or 0); pmt=float(pmt or 0); months=max(0,int(months)); annual=float(annual or 0)
+    if months<=0: return pv
+    if abs(annual)<1e-12: return pv+pmt*months
+    rm=(1+annual)**(1/12)-1
+    return pv*(1+rm)**months+pmt*(((1+rm)**months-1)/rm)
+
+def _house_total_invested(rows):
+    vals=[]
+    for r in rows or []:
+        if not isinstance(r,dict) or r.get('Erro'): continue
+        if str(r.get('Tipo instrumento') or '').upper()=='CFD': continue
+        x=_safe_float(r.get('Valor atual EUR'))
+        if x is not None: vals.append(x)
+    return sum(vals) if vals else None
+
+def _house_allocation(rows):
+    etf=0.0; actions=0.0; other=0.0
+    for r in rows or []:
+        if not isinstance(r,dict) or r.get('Erro'): continue
+        value=_safe_float(r.get('Valor atual EUR')) or 0.0
+        kind=str(r.get('Tipo instrumento') or '').strip().lower()
+        if value<=0 or kind=='cfd': continue
+        if any(k in kind for k in ['etf','etn','etc','fundo']): etf+=value
+        elif 'ação' in kind or 'acao' in kind or kind=='stock': actions+=value
+        else: other+=value
+    total=etf+actions+other
+    return {'total':total,'etf':etf,'acoes':actions,'outros':other,'etf_pct':etf/total if total>0 else None,'acoes_pct':actions/total if total>0 else None}
+
+def _house_position_weights(rows):
+    total=_house_total_invested(rows) or 0.0; out=[]
+    for r in rows or []:
+        if not isinstance(r,dict) or r.get('Erro') or str(r.get('Tipo instrumento') or '').upper()=='CFD': continue
+        v=_safe_float(r.get('Valor atual EUR')) or 0
+        out.append((str(r.get('Ticker XTB') or ''),str(r.get('Tipo instrumento') or ''),v/total if total>0 else 0.0))
+    return out
+
+def _house_sector_ratios(rows):
+    return [(s,w/100.0) for s,w in _v32_sector_weights(rows)]
+
+def _house_purchase_rhythm():
+    week=0; month=0; today=date.today()
+    for h in st.session_state.get('decision_history',[]) or []:
+        action=str(h.get('Decisão utilizador') or '').upper()
+        if not any(x in action for x in ['COMPR','REFOR','ACEIT']): continue
+        try:
+            ts=pd.to_datetime(h.get('Data decisão UTC'),utc=True,errors='coerce')
+            d=None if pd.isna(ts) else ts.date()
+        except Exception: d=None
+        if not d: continue
+        if 0 <= (today-d).days <= 6: week+=1
+        if d.year==today.year and d.month==today.month: month+=1
+    return week,month
+
+def _house_monthly_required(invested,cash,cfg,annual=None):
+    target=float(cfg.get('objetivo_eur') or 60000); months=_house_months_left(cfg)
+    if months<=0: return 0.0 if (float(invested or 0)+float(cash or 0))>=target else None
+    annual=float(cfg.get('retorno_planeamento') if annual is None else annual)
+    inv_month=float(cfg.get('mensal_xtb') or 0)+float(cfg.get('mensal_tr') or 0)
+    cash_month=float(cfg.get('mensal_cash_casa') or 0)
+    total_month=inv_month+cash_month
+    if total_month<=0: return None
+    share_inv=inv_month/total_month; share_cash=cash_month/total_month
+    rm=(1+annual)**(1/12)-1 if annual else 0
+    if rm:
+        future_inv=float(invested or 0)*(1+rm)**months
+        factor=((1+rm)**months-1)/rm
+    else:
+        future_inv=float(invested or 0); factor=months
+    base=future_inv+float(cash or 0); denom=share_inv*factor+share_cash*months
+    return max(0.0,(target-base)/denom) if denom>0 else None
+
+def _house_risk_phase(cfg=None):
+    cfg=cfg or _house_cfg(); m=_house_months_left(cfg)
+    if m>36: return ('Construção','70% ETF / 30% ações','Regularidade e diversificação; não aumentar concentração.')
+    if m>24: return ('Preparação','75% ETF / 25% ações','Começar a proteger gradualmente o capital já necessário para a casa.')
+    if m>12: return ('Proteção','80% ETF / 20% ações','Aumentar Cash Casa/capital defensivo e reduzir risco concentrado.')
+    return ('Preservação','90% defensivo / 10% ações','Prioridade a liquidez e preservação do montante da entrada.')
+
+def _house_monthly_plan(rows,cfg=None):
+    cfg=cfg or _house_cfg(); al=_house_allocation(rows)
+    xtb=float(cfg.get('mensal_xtb') or 0); tr=float(cfg.get('mensal_tr') or 0); invested_month=xtb+tr; warnings=[]
+    week,month=_house_purchase_rhythm()
+    if al['total']<=0:
+        return {'etf':xtb,'acoes':0.0,'warnings':['Sem valores atuais suficientes; não reforçar ações até atualizar a carteira.'],'week':week,'month':month}
+    target=float(cfg.get('alocacao_etf') or .70); total_after=al['total']+invested_month; etf_need=max(0.0,target*total_after-al['etf'])
+    xtb_etf=max(0.0,min(xtb,etf_need-tr)); xtb_actions=xtb-xtb_etf
+    overweight_actions=[t for t,k,w in _house_position_weights(rows) if ('ação' in k.lower() or 'acao' in k.lower()) and w>float(cfg.get('max_acao') or .10)]
+    overweight_sectors=[s for s,w in _house_sector_ratios(rows) if w>float(cfg.get('max_setor') or .35)]
+    if overweight_actions:
+        warnings.append('Ação acima de 10%: '+', '.join(overweight_actions[:3])+'. Não reforçar ações até normalizar.'); xtb_etf,xtb_actions=xtb,0.0
+    if overweight_sectors: warnings.append('Setor acima de 35%: '+', '.join(overweight_sectors[:3])+'. Evitar reforçar esse setor.')
+    if week>=int(cfg.get('max_acoes_semana') or 2) or month>=int(cfg.get('max_acoes_mes') or 6):
+        warnings.append('Limite de compras/reforços de ações atingido no período.'); xtb_etf,xtb_actions=xtb,0.0
+    return {'etf':xtb_etf,'acoes':xtb_actions,'warnings':warnings,'week':week,'month':month}
+
+def _house_brief(rows):
+    cfg=_house_cfg(); invested=_house_total_invested(rows); cash=float(cfg.get('cash_casa_eur') or 0); target=float(cfg.get('objetivo_eur') or 60000)
+    total=(invested+cash) if invested is not None else cash; progress=(total/target) if target>0 else 0; months=_house_months_left(cfg)
+    req=_house_monthly_required(invested or 0,cash,cfg); monthly=float(cfg.get('mensal_xtb') or 0)+float(cfg.get('mensal_tr') or 0)+float(cfg.get('mensal_cash_casa') or 0)
+    return {'cfg':cfg,'invested':invested,'cash':cash,'total':total,'progress':progress,'months':months,'required':req,'monthly':monthly,'plan':_house_monthly_plan(rows,cfg),'phase':_house_risk_phase(cfg),'allocation':_house_allocation(rows)}
+
+def _house_alerts(rows,brief=None):
+    b=brief or _house_brief(rows); cfg=b['cfg']; alerts=[]; al=b['allocation']; etfp=al.get('etf_pct')
+    if etfp is not None:
+        diff=etfp-float(cfg.get('alocacao_etf') or .70)
+        if abs(diff)<=.05: alerts.append(('good',f"Alocação perto do alvo: {_house_pct_ratio(etfp)} ETF / {_house_pct_ratio(al.get('acoes_pct'))} ações."))
+        elif diff<0: alerts.append(('warn',f"ETF abaixo do alvo: {_house_pct_ratio(etfp)} vs {_house_pct_ratio(cfg.get('alocacao_etf'))}. Priorizar ETF no reforço."))
+        else: alerts.append(('good',f"ETF acima do alvo: {_house_pct_ratio(etfp)}. Não é necessário aumentar ações só para perseguir 70/30."))
+    for t,k,w in _house_position_weights(rows):
+        if ('ação' in k.lower() or 'acao' in k.lower()) and w>float(cfg.get('max_acao') or .10): alerts.append(('bad',f'{t} pesa {w*100:.1f}%: acima do limite de 10%; não reforçar.'))
+    for s,w in _house_sector_ratios(rows):
+        if w>float(cfg.get('max_setor') or .35): alerts.append(('warn',f'{s} pesa {w*100:.1f}%: acima do limite setorial de 35%.'))
+    stats=_v31_portfolio_stats([r for r in rows or [] if isinstance(r,dict) and not r.get('Erro')])
+    total_ret=_safe_float(stats.get('return_pct'))
+    if total_ret is not None and total_ret<=float(cfg.get('travão_revisao_total') or -.40)*100:
+        alerts.append(('bad',f'Carteira em {total_ret:.1f}% desde o custo aproximado: ativar revisão global de risco; não vender tudo automaticamente.'))
+    for r in rows or []:
+        if not isinstance(r,dict) or r.get('Erro'): continue
+        pl=_safe_float(r.get('P/L %'))
+        if pl is not None and pl<=float(cfg.get('travão_revisao_posicao') or -.20)*100: alerts.append(('warn',f"{r.get('Ticker XTB')} está em {pl:.1f}% desde o preço médio: rever tese; o -20% não é ordem automática de venda."))
+    return (alerts or [('good','Nada fora do normal nas regras do objetivo Casa 60k.')])[:6]
+
+def _house_projections_html(brief):
+    cfg=brief['cfg']; invested=brief['invested'] or 0; cash=brief['cash']; months=brief['months']; target=float(cfg.get('objetivo_eur') or 60000)
+    invm=float(cfg.get('mensal_xtb') or 0)+float(cfg.get('mensal_tr') or 0); cashm=float(cfg.get('mensal_cash_casa') or 0); rows=[]
+    for name,rate in [('Planeamento 5%',.05),('Cenário 7%',.07),('Cenário 8%',.08)]:
+        val=_house_fv(invested,invm,rate,months)+cash+cashm*months; diff=val-target; cls='good' if diff>=0 else 'bad'
+        rows.append(f'<tr><td>{name}</td><td>{_house_money(val)}</td><td class="{cls}">{"+" if diff>=0 else ""}{_house_money(diff)}</td></tr>')
+    return '<table class="g33-table"><thead><tr><th>Cenário</th><th>Valor estimado</th><th>vs 60k</th></tr></thead><tbody>'+''.join(rows)+'</tbody></table>'
+
+def _house_milestones_html(progress,target=60000):
+    marks=[10000,20000,30000,40000,50000,60000]; current=max(0,float(progress or 0))*float(target or 60000)
+    return '<div class="g33-milestones">'+''.join(f'<div class="g33-mile {"done" if current>=m else ""}"><b>{m//1000}k€</b><br>{m/60000*100:.0f}%</div>' for m in marks)+'</div>'
+
+def _house_render_goal_page(rows):
+    b=_house_brief(rows); cfg=b['cfg']; target=float(cfg.get('objetivo_eur') or 60000); pctv=max(0,min(100,b['progress']*100)); phase,target_mix,phase_note=b['phase']
+    st.markdown('<div class="sy-page-title">Objetivo Casa 60.000 €</div><div class="sy-page-sub">Plano, ritmo e proteção do capital. A carteira continua a ser a mesma da v32.</div>',unsafe_allow_html=True)
+    st.markdown(f'''<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">Progresso do objetivo</div><div class="sy-card-sub">Horizonte até {_house_target_date(cfg).strftime('%d/%m/%Y')}</div></div><strong>{pctv:.1f}%</strong></div><div class="g33-goal-progress"><div class="g33-goal-fill" style="width:{pctv:.1f}%"></div></div><div class="g33-goal-row"><span>Total para a casa</span><strong>{_house_money(b['total'])}</strong></div><div class="g33-goal-row"><span>Faltam</span><strong>{_house_money(max(0,target-b['total']))}</strong></div><div class="g33-goal-row"><span>Contribuição mensal atual</span><strong>{_house_money(b['monthly'])}</strong></div><div class="g33-goal-row"><span>Meses restantes</span><strong>{b['months']}</strong></div>{_house_milestones_html(b['progress'],target)}</div>''',unsafe_allow_html=True)
+    c1,c2=st.columns([1.15,.85],gap='large')
+    with c1:
+        st.markdown('<div class="sy-card"><div class="sy-card-title">Projeções com os valores atuais</div>'+_house_projections_html(b)+'</div>',unsafe_allow_html=True)
+        st.markdown(f'''<div class="g33-action"><div class="g33-action-title">Reforço mensal sugerido</div><div class="g33-action-main">XTB: {_house_money(b['plan']['etf'])} ETF · {_house_money(b['plan']['acoes'])} ações</div><div class="g33-action-note">Os {_house_money(cfg.get('mensal_tr'))} da Trade Republic já são considerados no bloco ETF/ETC. Cash Casa: {_house_money(cfg.get('mensal_cash_casa'))}/mês.</div></div>''',unsafe_allow_html=True)
+        for w in b['plan'].get('warnings',[]): st.warning(w)
+    with c2:
+        req=b['required']; gap=(b['monthly']-req) if req is not None else None; gap_html=''
+        if gap is not None: gap_html=f'<div class="sy-today {"pos" if gap>=0 else "neg"}" style="margin-top:.5rem">{"+" if gap>=0 else ""}{_house_money(gap)} vs necessário</div>'
+        st.markdown(f'''<div class="sy-card"><div class="sy-card-title">Ritmo necessário</div><div class="sy-value" style="font-size:1.55rem">{_house_money(req) if req is not None else 'N/D'}<span style="font-size:.72rem;color:var(--sy-muted)"> /mês</span></div><div class="sy-card-sub">Planeamento a 5%. Plano atual: {_house_money(b['monthly'])}/mês.</div>{gap_html}</div>''',unsafe_allow_html=True)
+        st.markdown(f'''<div class="sy-card"><div class="sy-card-title">Risco · {phase}</div><div class="sy-stat-value">{target_mix}</div><div class="sy-card-sub" style="margin-top:.35rem">{phase_note}</div></div>''',unsafe_allow_html=True)
+    with st.expander('⚙️ Ajustar mandato Casa 60k',expanded=False):
+        with st.form('house_goal_form'):
+            g1,g2,g3=st.columns(3)
+            goal=g1.number_input('Objetivo €',min_value=1000.0,value=float(cfg.get('objetivo_eur') or 60000),step=1000.0); tdate=g2.date_input('Data objetivo',value=_house_target_date(cfg)); cash=g3.number_input('Cash Casa atual €',min_value=0.0,value=float(cfg.get('cash_casa_eur') or 0),step=50.0)
+            m1,m2,m3=st.columns(3)
+            xtb=m1.number_input('Mensal XTB €',min_value=0.0,value=float(cfg.get('mensal_xtb') or 0),step=10.0); tr=m2.number_input('Mensal Trade Republic €',min_value=0.0,value=float(cfg.get('mensal_tr') or 0),step=1.0); mcash=m3.number_input('Mensal Cash Casa €',min_value=0.0,value=float(cfg.get('mensal_cash_casa') or 0),step=10.0)
+            if st.form_submit_button('Guardar mandato',type='primary',use_container_width=True):
+                new=dict(cfg); new.update({'objetivo_eur':float(goal),'target_date':tdate.isoformat(),'cash_casa_eur':float(cash),'mensal_xtb':float(xtb),'mensal_tr':float(tr),'mensal_cash_casa':float(mcash)})
+                st.session_state.house_goal=new; save_persistent_state(show_error=True); st.success('Mandato atualizado.'); st.rerun()
+
 def _v31_render_today():
     if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
     rows=_v31_rows(); inputs=st.session_state.get('portfolio_input',[]) or []
-    st.markdown('<div class="sy-page-title">Visão Geral</div><div class="sy-page-sub">A carteira primeiro. O detalhe só aparece quando precisas.</div>',unsafe_allow_html=True)
+    st.markdown('<div class="sy-page-title">Briefing Hoje</div><div class="sy-page-sub">Carteira, objetivo Casa 60k e a única ação que merece atenção agora.</div>',unsafe_allow_html=True)
     if not rows:
         read_failed=persistence_enabled() and st.session_state.get('_persistence_read_ok') is False
-        st.markdown(f'''<div class="sy-hero"><div class="sy-eyebrow">EM CARTEIRA</div><div class="sy-value">{len(inputs) if inputs else '—'} posições</div><div class="sy-today na">{'Armazenamento indisponível' if read_failed else 'Ainda sem snapshot de mercado'}</div></div>''',unsafe_allow_html=True)
+        st.markdown(f'''<div class="sy-hero"><div class="sy-eyebrow">CARTEIRA</div><div class="sy-value">{len(inputs) if inputs else '—'} posições</div><div class="sy-today na">{'Armazenamento indisponível' if read_failed else 'Ainda sem snapshot de mercado'}</div></div>''',unsafe_allow_html=True)
         if read_failed:
             st.error('Não consegui ler a carteira guardada. A app não está a assumir que tens 0 posições.')
-            if st.button('Tentar carregar novamente',type='primary',use_container_width=True,key='v32_retry_storage'): load_persistent_state(force=True,fast=False); st.rerun()
+            if st.button('Tentar carregar novamente',type='primary',use_container_width=True,key='v33_retry_storage'): load_persistent_state(force=True,fast=False); st.rerun()
             with st.expander('Detalhe técnico'): st.code(st.session_state.get('persistence_error','Erro desconhecido'))
         elif inputs:
-            st.info('A carteira foi carregada, mas ainda não existe um snapshot de mercado. Atualiza uma vez; depois a Visão Geral abre com os últimos valores guardados.')
-            if st.button('Atualizar carteira',type='primary',use_container_width=True,key='v32_refresh_empty'): _v32_refresh_portfolio()
-        else: st.info('Importa a carteira em **Carteira**. Depois a Visão Geral abre com o último snapshot guardado.')
+            st.info('A carteira foi carregada, mas ainda não existe um snapshot de mercado. Atualiza uma vez; depois o Briefing abre com os últimos valores guardados.')
+            if st.button('Atualizar carteira',type='primary',use_container_width=True,key='v33_refresh_empty'): _v32_refresh_portfolio()
+        else: st.info('Importa a carteira em **Carteira**. Depois o Briefing abre com o último snapshot guardado.')
         return
-    good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]; s=_v31_portfolio_stats(good)
-    d=s.get('day_eur'); dp=s.get('day_pct'); dcls='pos' if (d or 0)>=0 else 'neg'; dtext=(_v31_money(d)+' · '+_v31_pct(dp)+' hoje') if d is not None else 'Variação do dia indisponível no snapshot'
-    counts={'Manter':0,'Reforçar':0,'Aguardar':0,'Rever':0,'Acompanhar':0}
-    for r in good: counts[_v31_decision_bucket(r.get('Decisão principal'))[0]]+=1
-    st.markdown(f'''<div class="sy-hero"><div class="sy-hero-top"><div><div class="sy-eyebrow">EM CARTEIRA · {len(inputs) or len(rows)} POSIÇÕES</div><div class="sy-value">{_v31_money(s.get('total'))}</div><div class="sy-today {dcls}">{dtext}</div></div><div class="sy-live"><span class="sy-dot"></span>{html.escape(_v32_updated_label())}</div></div><div class="sy-hero-meta"><div><div class="sy-meta-label">Resultado total</div><div class="sy-meta-val">{_v31_money(s.get('pnl'))}</div></div><div><div class="sy-meta-label">Rentabilidade</div><div class="sy-meta-val">{_v31_pct(s.get('return_pct'))}</div></div><div><div class="sy-meta-label">A rever</div><div class="sy-meta-val">{counts['Rever']}</div></div><div><div class="sy-meta-label">Candidatas a reforço</div><div class="sy-meta-val">{counts['Reforçar']}</div></div></div></div>''',unsafe_allow_html=True)
-    st.markdown(f'''<div class="sy-grid-3"><div class="sy-stat"><div class="sy-stat-label">Manter</div><div class="sy-stat-value">{counts['Manter']}</div><div class="sy-stat-note">sem ação imediata</div></div><div class="sy-stat"><div class="sy-stat-label">Aguardar</div><div class="sy-stat-value">{counts['Aguardar']}</div><div class="sy-stat-note">entrada/reforço ainda não ideal</div></div><div class="sy-stat"><div class="sy-stat-label">Cobertura</div><div class="sy-stat-value">{len(good)}/{len(inputs) or len(rows)}</div><div class="sy-stat-note">posições com dados no snapshot</div></div></div>''',unsafe_allow_html=True)
-    left,right=st.columns([1.55,.85],gap='large')
+    good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]; s=_v31_portfolio_stats(good); b=_house_brief(good); cfg=b['cfg']
+    d=s.get('day_eur'); dp=s.get('day_pct'); dtext=(_v31_money(d)+' · '+_v31_pct(dp)+' hoje') if d is not None else 'Variação do dia indisponível no snapshot'
+    target=float(cfg.get('objetivo_eur') or 60000); progress=max(0,min(1,b['progress']))
+    st.markdown(f'''<div class="g33-kpi-grid"><div class="g33-kpi"><div class="g33-label">Investido (carteira)</div><div class="g33-kpi-value">{_house_money(b['invested'])}</div><div class="g33-note">{dtext}</div></div><div class="g33-kpi"><div class="g33-label">Cash Casa</div><div class="g33-kpi-value">{_house_money(b['cash'])}</div><div class="g33-note">fora da volatilidade da carteira</div></div><div class="g33-kpi"><div class="g33-label">Total para a casa</div><div class="g33-kpi-value">{_house_money(b['total'])}</div><div class="g33-note">investido + Cash Casa</div></div><div class="g33-kpi"><div class="g33-label">Progresso 60k</div><div class="g33-kpi-value">{progress*100:.1f}%</div><div class="g33-note">faltam {_house_money(max(0,target-b['total']))}</div></div></div>''',unsafe_allow_html=True)
+    left,right=st.columns([1.85,1],gap='large')
     with left:
-        st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">As minhas posições</div><div class="sy-card-sub">Preço, dia e resultado desde o preço médio</div></div></div>'+_v32_positions_html(good,limit=8)+'</div>',unsafe_allow_html=True)
-        if len(good)>8: st.caption(f'Mostradas as 8 maiores posições por valor. Vê as {len(good)} em Carteira.')
+        months=max(1,b['months']); pts=[]; inv=b['invested'] or 0; cash=b['cash']; invm=float(cfg.get('mensal_xtb') or 0)+float(cfg.get('mensal_tr') or 0); cashm=float(cfg.get('mensal_cash_casa') or 0)
+        for m in range(0,months+1,max(1,months//24)): pts.append({'Mês':m,'Planeamento 5%':_house_fv(inv,invm,.05,m)+cash+cashm*m,'Objetivo':target})
+        if pts[-1]['Mês']!=months: pts.append({'Mês':months,'Planeamento 5%':_house_fv(inv,invm,.05,months)+cash+cashm*months,'Objetivo':target})
+        st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">Trajetória para a casa</div><div class="sy-card-sub">Projeção de planeamento a 5%; não é promessa de rentabilidade</div></div></div>',unsafe_allow_html=True)
+        st.line_chart(pd.DataFrame(pts).set_index('Mês'),height=220); st.markdown('</div>',unsafe_allow_html=True)
+        al=b['allocation']; etfp=al.get('etf_pct') or 0; ap=al.get('acoes_pct') or 0; op=max(0,1-etfp-ap); deg1=etfp*360; deg2=(etfp+ap)*360
+        other_html=f'<div class="g33-legend-row"><span>Outros</span><strong>{op*100:.1f}%</strong></div>' if op>.001 else ''
+        st.markdown(f'''<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">Alocação da carteira</div><div class="sy-card-sub">Alvo do mandato: 70% ETF / 30% ações</div></div></div><div class="g33-donut-wrap"><div class="g33-donut" style="background:conic-gradient(var(--sy-blue) 0deg {deg1:.1f}deg,var(--sy-orange) {deg1:.1f}deg {deg2:.1f}deg,#516174 {deg2:.1f}deg 360deg)"><div class="g33-donut-center"><strong>{etfp*100:.0f}%</strong><small>ETF/ETN/ETC</small></div></div><div class="g33-legend"><div class="g33-legend-row"><span>ETF/ETN/ETC</span><strong>{etfp*100:.1f}% · {_house_money(al.get('etf'))}</strong></div><div class="g33-legend-row"><span>Ações</span><strong>{ap*100:.1f}% · {_house_money(al.get('acoes'))}</strong></div>{other_html}</div></div></div>''',unsafe_allow_html=True)
+        alerts=_house_alerts(good,b); alert_html=''.join(f'<div class="g33-alert {"warn" if tone=="warn" else "bad" if tone=="bad" else ""}"><div class="g33-alert-dot">{"!" if tone!="good" else "✓"}</div><div class="g33-alert-text">{html.escape(msg)}</div></div>' for tone,msg in alerts)
+        st.markdown('<div class="sy-card"><div class="sy-card-title">Alertas de hoje</div>'+alert_html+'</div>',unsafe_allow_html=True)
     with right:
-        sectors=_v32_sector_weights(good); bars=[]
-        for sec,w in sectors[:6]: bars.append(f'<div class="sy-bar-row"><div class="sy-bar-top"><span>{html.escape(sec)}</span><strong>{w:.1f}%</strong></div><div class="sy-track"><div class="sy-fill" style="width:{min(100,max(0,w)):.1f}%"></div></div></div>')
-        st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">Exposição</div><div class="sy-card-sub">Peso por setor no último snapshot</div></div></div>'+(''.join(bars) if bars else '<div class="sy-card-sub">Sem valores suficientes.</div>')+'</div>',unsafe_allow_html=True)
-        st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">O que merece atenção</div><div class="sy-card-sub">Prioridades do último snapshot</div></div></div>'+_v32_attention_html(good,4)+'</div>',unsafe_allow_html=True)
-    if st.button('Atualizar dados de mercado',use_container_width=True,key='v32_today_refresh'): _v32_refresh_portfolio()
-    st.caption('Os preços mostrados são os do último snapshot guardado; a app não os apresenta como streaming em tempo real.')
-
+        phase,target_mix,phase_note=b['phase']; req=b['required']
+        st.markdown(f'''<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">⌂ Objetivo Casa {_house_money(target,0)}</div><div class="sy-card-sub">{b['months']} meses restantes · fase {phase}</div></div><strong>{progress*100:.1f}%</strong></div><div class="g33-goal-progress"><div class="g33-goal-fill" style="width:{progress*100:.1f}%"></div></div><div class="g33-goal-row"><span>Faltam</span><strong>{_house_money(max(0,target-b['total']))}</strong></div><div class="g33-goal-row"><span>Contribuição mensal</span><strong>{_house_money(b['monthly'])}</strong></div><div class="g33-goal-row"><span>Ritmo necessário (5%)</span><strong>{_house_money(req) if req is not None else 'N/D'}</strong></div><div class="g33-goal-row"><span>Risco de referência</span><strong>{target_mix}</strong></div>{_house_milestones_html(b['progress'],target)}</div>''',unsafe_allow_html=True)
+        st.markdown('<div class="sy-card"><div class="sy-card-title">Projeções</div>'+_house_projections_html(b)+'</div>',unsafe_allow_html=True)
+        plan=b['plan']; action_main=f"XTB: {_house_money(plan['etf'])} ETF · {_house_money(plan['acoes'])} ações"; note=(plan['warnings'][0] if plan.get('warnings') else f"Trade Republic {_house_money(cfg.get('mensal_tr'))} + Cash Casa {_house_money(cfg.get('mensal_cash_casa'))} já considerados.")
+        st.markdown(f'''<div class="g33-action"><div class="g33-action-title">Próxima ação</div><div class="g33-action-main">{action_main}</div><div class="g33-action-note">{html.escape(note)}</div></div>''',unsafe_allow_html=True)
+    st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">Posições</div><div class="sy-card-sub">Preço, resultado e decisão do último snapshot</div></div></div>'+_v32_positions_html(good,limit=8)+'</div>',unsafe_allow_html=True)
+    weights=_house_position_weights(good); maxw=max([w for _,_,w in weights],default=0); week,month=_house_purchase_rhythm(); sectors=_house_sector_ratios(good); maxsec=max([w for _,w in sectors],default=0)
+    st.markdown(f'''<div class="g33-limit-grid"><div class="g33-limit"><span>Peso máximo por ação</span><strong>≤ 10%</strong></div><div class="g33-limit"><span>Maior peso atual</span><strong class="{'g33-warn' if maxw>.10 else 'g33-positive'}">{maxw*100:.1f}%</strong></div><div class="g33-limit"><span>Maior setor</span><strong class="{'g33-warn' if maxsec>.35 else 'g33-positive'}">{maxsec*100:.1f}% / 35%</strong></div><div class="g33-limit"><span>Compras mês</span><strong>{month} / {int(cfg.get('max_acoes_mes') or 6)}</strong></div><div class="g33-limit"><span>Compras 7 dias</span><strong>{week} / {int(cfg.get('max_acoes_semana') or 2)}</strong></div></div>''',unsafe_allow_html=True)
+    if st.button('Atualizar dados de mercado',use_container_width=True,key='v33_today_refresh'): _v32_refresh_portfolio()
+    st.caption('A app mostra a hora do último snapshot. Não chama “tempo real” a um preço que não foi atualizado nesta sessão.')
 def _v31_render_positions(rows):
     good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]
     if not good: st.markdown('<div class="sy-empty">Ainda não existem posições com dados de mercado no snapshot.</div>',unsafe_allow_html=True); return
@@ -4273,7 +4514,7 @@ def _comparison_metric_card(label, ticker, note=''):
     if note:
         st.caption(note)
 
-TOP_PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Descobrir', 'Analisar'], horizontal=True, label_visibility='collapsed', key='main_page_v31', format_func=lambda x:{'Hoje':'⌂  Visão geral','Carteira':'▣  Carteira','Descobrir':'◉  Radar','Analisar':'⌕  Analisar'}[x])
+TOP_PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Descobrir', 'Analisar', 'Objetivo'], horizontal=True, label_visibility='collapsed', key='main_page_v31', format_func=lambda x:{'Hoje':'⌂  Hoje','Carteira':'▣  Carteira','Descobrir':'◉  Descobrir','Analisar':'⌕  Analisar','Objetivo':'⌂  Casa 60k'}[x])
 PAGE = TOP_PAGE
 if TOP_PAGE == 'Carteira':
     _carteira_view = st.radio('Carteira', ['Posições', 'Risco e alertas'], horizontal=True, label_visibility='collapsed', key='carteira_view_v31')
@@ -4286,6 +4527,11 @@ elif TOP_PAGE == 'Analisar':
 
 if PAGE == 'Hoje':
     _v31_render_today()
+
+elif PAGE == 'Objetivo':
+    if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
+    _house_render_goal_page(_v31_rows())
+    _v32_storage_controls()
 
 elif PAGE == 'Carteira':
     st.markdown('<div class="sy-page-title">Carteira</div><div class="sy-page-sub">Todas as posições, com o resultado e o estado da última análise.</div>',unsafe_allow_html=True)
@@ -4303,7 +4549,7 @@ elif PAGE == 'Carteira':
             with a2: mq=st.number_input('Quantidade',min_value=0.0,value=0.0,step=0.01)
             with a3: mp=st.number_input('Preço médio',min_value=0.0,value=0.0,step=0.01)
             a4,a5,a6=st.columns(3)
-            with a4: mi=st.selectbox('Tipo de instrumento',INSTRUMENT_TYPES,index=0)
+            with a4: mi=st.selectbox('Tipo de instrumento',[x for x in INSTRUMENT_TYPES if x!='CFD'],index=0)
             with a5: mo=st.selectbox('Objetivo',['Longo prazo','Curto prazo'])
             with a6: mtarget=st.number_input('Alvo pessoal (opcional)',min_value=0.0,value=0.0,step=0.01)
             ax1,ax2=st.columns(2)
@@ -4344,9 +4590,14 @@ elif PAGE == 'Carteira':
                     if 'Multiplicador contrato' not in imp.columns:
                         imp['Multiplicador contrato']=0.0
                     imp['Tipo instrumento']=imp['Tipo instrumento'].apply(_normalize_instrument_type)
-                    st.session_state.portfolio_input=imp.to_dict('records')
-                    save_persistent_state(show_error=True)
-                    st.success('Carteira importada e guardada. A coluna Tipo instrumento e opcional: Auto, Ação, ETF, ETN ou CFD.')
+                    cfd_rows=imp[imp['Tipo instrumento'].eq('CFD')]
+                    if not cfd_rows.empty:
+                        tickers=', '.join(cfd_rows['Ticker XTB'].astype(str).tolist()[:8])
+                        st.error(f'O mandato Casa 60k não permite CFDs. Remove estes instrumentos do CSV antes de importar: {tickers}.')
+                    else:
+                        st.session_state.portfolio_input=imp.to_dict('records')
+                        save_persistent_state(show_error=True)
+                        st.success('Carteira importada e guardada. Tipos aceites no mandato: Auto, Ação, ETF ou ETN.')
             except Exception as e:
                 st.error(str(e))
         pexport=pd.DataFrame(st.session_state.portfolio_input)
