@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title='Gestor v33 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
+st.set_page_config(page_title='Gestor v33.1 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
 
 # -----------------------------------------------------------------------------
 # Autenticação multiutilizador
@@ -114,7 +114,7 @@ if st.session_state.get('_app_authenticated'):
 
 st.markdown('''
 <div class="sy-topbar">
-  <div class="sy-wordmark"><span class="sy-mark">▥</span><span>Gestor <b>v33</b><small> · Casa 60k · B5b · 70/30</small></span></div>
+  <div class="sy-wordmark"><span class="sy-mark">▥</span><span>Gestor <b>v33.1</b><small> · Casa 60k · B5b · 70/30</small></span></div>
   <div class="sy-account">''' + html.escape(str(st.session_state.get('_user_display') or '')) + '''</div>
 </div>
 ''', unsafe_allow_html=True)
@@ -4338,6 +4338,8 @@ def _house_sector_ratios(rows):
 def _house_purchase_rhythm():
     week=0; month=0; today=date.today()
     for h in st.session_state.get('decision_history',[]) or []:
+        if not isinstance(h,dict):
+            continue
         action=str(h.get('Decisão utilizador') or '').upper()
         if not any(x in action for x in ['COMPR','REFOR','ACEIT']): continue
         try:
@@ -4454,7 +4456,42 @@ def _house_render_goal_page(rows):
                 new=dict(cfg); new.update({'objetivo_eur':float(goal),'target_date':tdate.isoformat(),'cash_casa_eur':float(cash),'mensal_xtb':float(xtb),'mensal_tr':float(tr),'mensal_cash_casa':float(mcash)})
                 st.session_state.house_goal=new; save_persistent_state(show_error=True); st.success('Mandato atualizado.'); st.rerun()
 
-def _v31_render_today():
+def _v32_safe_today_fallback():
+    if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
+    rows=_v31_rows(); inputs=st.session_state.get('portfolio_input',[]) or []
+    st.markdown('<div class="sy-page-title">Visão Geral</div><div class="sy-page-sub">A carteira primeiro. O detalhe só aparece quando precisas.</div>',unsafe_allow_html=True)
+    if not rows:
+        read_failed=persistence_enabled() and st.session_state.get('_persistence_read_ok') is False
+        st.markdown(f'''<div class="sy-hero"><div class="sy-eyebrow">EM CARTEIRA</div><div class="sy-value">{len(inputs) if inputs else '—'} posições</div><div class="sy-today na">{'Armazenamento indisponível' if read_failed else 'Ainda sem snapshot de mercado'}</div></div>''',unsafe_allow_html=True)
+        if read_failed:
+            st.error('Não consegui ler a carteira guardada. A app não está a assumir que tens 0 posições.')
+            if st.button('Tentar carregar novamente',type='primary',use_container_width=True,key='v32_retry_storage'): load_persistent_state(force=True,fast=False); st.rerun()
+            with st.expander('Detalhe técnico'): st.code(st.session_state.get('persistence_error','Erro desconhecido'))
+        elif inputs:
+            st.info('A carteira foi carregada, mas ainda não existe um snapshot de mercado. Atualiza uma vez; depois a Visão Geral abre com os últimos valores guardados.')
+            if st.button('Atualizar carteira',type='primary',use_container_width=True,key='v32_refresh_empty'): _v32_refresh_portfolio()
+        else: st.info('Importa a carteira em **Carteira**. Depois a Visão Geral abre com o último snapshot guardado.')
+        return
+    good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]; s=_v31_portfolio_stats(good)
+    d=s.get('day_eur'); dp=s.get('day_pct'); dcls='pos' if (d or 0)>=0 else 'neg'; dtext=(_v31_money(d)+' · '+_v31_pct(dp)+' hoje') if d is not None else 'Variação do dia indisponível no snapshot'
+    counts={'Manter':0,'Reforçar':0,'Aguardar':0,'Rever':0,'Acompanhar':0}
+    for r in good: counts[_v31_decision_bucket(r.get('Decisão principal'))[0]]+=1
+    st.markdown(f'''<div class="sy-hero"><div class="sy-hero-top"><div><div class="sy-eyebrow">EM CARTEIRA · {len(inputs) or len(rows)} POSIÇÕES</div><div class="sy-value">{_v31_money(s.get('total'))}</div><div class="sy-today {dcls}">{dtext}</div></div><div class="sy-live"><span class="sy-dot"></span>{html.escape(_v32_updated_label())}</div></div><div class="sy-hero-meta"><div><div class="sy-meta-label">Resultado total</div><div class="sy-meta-val">{_v31_money(s.get('pnl'))}</div></div><div><div class="sy-meta-label">Rentabilidade</div><div class="sy-meta-val">{_v31_pct(s.get('return_pct'))}</div></div><div><div class="sy-meta-label">A rever</div><div class="sy-meta-val">{counts['Rever']}</div></div><div><div class="sy-meta-label">Candidatas a reforço</div><div class="sy-meta-val">{counts['Reforçar']}</div></div></div></div>''',unsafe_allow_html=True)
+    st.markdown(f'''<div class="sy-grid-3"><div class="sy-stat"><div class="sy-stat-label">Manter</div><div class="sy-stat-value">{counts['Manter']}</div><div class="sy-stat-note">sem ação imediata</div></div><div class="sy-stat"><div class="sy-stat-label">Aguardar</div><div class="sy-stat-value">{counts['Aguardar']}</div><div class="sy-stat-note">entrada/reforço ainda não ideal</div></div><div class="sy-stat"><div class="sy-stat-label">Cobertura</div><div class="sy-stat-value">{len(good)}/{len(inputs) or len(rows)}</div><div class="sy-stat-note">posições com dados no snapshot</div></div></div>''',unsafe_allow_html=True)
+    left,right=st.columns([1.55,.85],gap='large')
+    with left:
+        st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">As minhas posições</div><div class="sy-card-sub">Preço, dia e resultado desde o preço médio</div></div></div>'+_v32_positions_html(good,limit=8)+'</div>',unsafe_allow_html=True)
+        if len(good)>8: st.caption(f'Mostradas as 8 maiores posições por valor. Vê as {len(good)} em Carteira.')
+    with right:
+        sectors=_v32_sector_weights(good); bars=[]
+        for sec,w in sectors[:6]: bars.append(f'<div class="sy-bar-row"><div class="sy-bar-top"><span>{html.escape(sec)}</span><strong>{w:.1f}%</strong></div><div class="sy-track"><div class="sy-fill" style="width:{min(100,max(0,w)):.1f}%"></div></div></div>')
+        st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">Exposição</div><div class="sy-card-sub">Peso por setor no último snapshot</div></div></div>'+(''.join(bars) if bars else '<div class="sy-card-sub">Sem valores suficientes.</div>')+'</div>',unsafe_allow_html=True)
+        st.markdown('<div class="sy-card"><div class="sy-card-head"><div><div class="sy-card-title">O que merece atenção</div><div class="sy-card-sub">Prioridades do último snapshot</div></div></div>'+_v32_attention_html(good,4)+'</div>',unsafe_allow_html=True)
+    if st.button('Atualizar dados de mercado',use_container_width=True,key='v32_today_refresh'): _v32_refresh_portfolio()
+    st.caption('Os preços mostrados são os do último snapshot guardado; a app não os apresenta como streaming em tempo real.')
+
+
+def _v33_render_today_inner():
     if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
     rows=_v31_rows(); inputs=st.session_state.get('portfolio_input',[]) or []
     st.markdown('<div class="sy-page-title">Briefing Hoje</div><div class="sy-page-sub">Carteira, objetivo Casa 60k e a única ação que merece atenção agora.</div>',unsafe_allow_html=True)
@@ -4497,6 +4534,17 @@ def _v31_render_today():
     st.markdown(f'''<div class="g33-limit-grid"><div class="g33-limit"><span>Peso máximo por ação</span><strong>≤ 10%</strong></div><div class="g33-limit"><span>Maior peso atual</span><strong class="{'g33-warn' if maxw>.10 else 'g33-positive'}">{maxw*100:.1f}%</strong></div><div class="g33-limit"><span>Maior setor</span><strong class="{'g33-warn' if maxsec>.35 else 'g33-positive'}">{maxsec*100:.1f}% / 35%</strong></div><div class="g33-limit"><span>Compras mês</span><strong>{month} / {int(cfg.get('max_acoes_mes') or 6)}</strong></div><div class="g33-limit"><span>Compras 7 dias</span><strong>{week} / {int(cfg.get('max_acoes_semana') or 2)}</strong></div></div>''',unsafe_allow_html=True)
     if st.button('Atualizar dados de mercado',use_container_width=True,key='v33_today_refresh'): _v32_refresh_portfolio()
     st.caption('A app mostra a hora do último snapshot. Não chama “tempo real” a um preço que não foi atualizado nesta sessão.')
+
+def _v31_render_today():
+    try:
+        _v33_render_today_inner()
+    except Exception as e:
+        st.session_state['_v33_today_error']=str(e)
+        st.warning('O novo Briefing encontrou dados antigos/incompatíveis. A mostrar temporariamente a vista estável da v32.')
+        with st.expander('Detalhe técnico',expanded=False):
+            st.code(str(e))
+        _v32_safe_today_fallback()
+
 def _v31_render_positions(rows):
     good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]
     if not good: st.markdown('<div class="sy-empty">Ainda não existem posições com dados de mercado no snapshot.</div>',unsafe_allow_html=True); return
@@ -4530,7 +4578,11 @@ if PAGE == 'Hoje':
 
 elif PAGE == 'Objetivo':
     if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
-    _house_render_goal_page(_v31_rows())
+    try:
+        _house_render_goal_page(_v31_rows())
+    except Exception as e:
+        st.error('Não consegui abrir o Objetivo Casa com os dados guardados.')
+        st.code(str(e))
     _v32_storage_controls()
 
 elif PAGE == 'Carteira':
