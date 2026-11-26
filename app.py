@@ -72,7 +72,7 @@ except Exception:
 
 if _USERS and not st.session_state.get('_app_authenticated',False):
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.3 · Finanças e INVEST')
+    st.caption('Gestor v33.4 · Finanças e INVEST')
     st.caption('Entra com o teu utilizador. Cada conta tem carteira, histórico e dados próprios.')
     _login_user=st.text_input('Utilizador').strip().lower()
     _login_pw=st.text_input('Palavra-passe',type='password')
@@ -91,7 +91,7 @@ if _USERS and not st.session_state.get('_app_authenticated',False):
 elif (not _USERS) and _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
     # Compatibilidade com a configuração antiga de uma única palavra-passe.
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.3 · Finanças e INVEST')
+    st.caption('Gestor v33.4 · Finanças e INVEST')
     _pw=st.text_input('Palavra-passe da aplicação',type='password')
     if st.button('Entrar',type='primary',use_container_width=True):
         if hmac.compare_digest(str(_pw),_APP_PASSWORD):
@@ -4893,6 +4893,24 @@ def _invest_review(records):
                                   'closed': _now_utc_iso(), 'statement_date': statement_day.isoformat()})
 
 
+def _balances_readable(records):
+    for row in records:
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k].strip()
+                                               for k in ('Conta', 'Moeda', 'Data')):
+            return False
+        try:
+            date.fromisoformat(row['Data'])
+        except ValueError:
+            return False
+        for field in FINANCE_COLUMNS[4:8]:
+            if field not in row:
+                return False
+            value = row[field]
+            if value is not None and (type(value) not in (float, int) or not math.isfinite(value)):
+                return False
+    return True
+
+
 def _balance_summary(rows):
     cash, investments, debt = [_finance_total(rows, field) for field in FINANCE_COLUMNS[4:7]]
     dates = {r['Data'] for r in rows}
@@ -4912,6 +4930,9 @@ def _render_finances(month_only=False):
         st.info('Armazenamento privado indisponível. A completude do mês não pode ser verificada.')
         return
     records = st.session_state.get('finance_balances', [])
+    if not _balances_readable(records):
+        st.warning('Existe um saldo guardado incompleto. O total do património está indisponível.')
+        return
     if month_only:
         _invest_review(records)
         return
@@ -5172,17 +5193,42 @@ elif section == 'Carteira':
     if PAGE == 'Gestão':
         PAGE = 'Carteira'
 
-if PAGE == 'Início':
-    if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
+if PAGE in ('Início', 'Posições'):
+    enabled = persistence_enabled()
+    if enabled and not st.session_state.get('_persistent_loaded') and st.session_state.get('_persistence_read_ok') is not False:
         load_persistent_state(fast=True)
+    read_ok = enabled and st.session_state.get('_persistence_read_ok') is True
+    failed = enabled and not read_ok
+    positions = [] if failed else st.session_state.get('portfolio_input', [])
+    rows = _v31_rows() if positions else []
+    invested, _, daily = _position_summary(positions, rows)
+    st.title('Visão geral' if PAGE == 'Início' else 'Carteira')
+    if failed:
+        st.warning('Não foi possível ler a carteira guardada. O saldo e as posições estão por confirmar.')
+        st.button('Tentar ler novamente', key='portfolio_retry_read', on_click=load_persistent_state,
+                  kwargs={'force': True, 'fast': False})
+    elif not enabled:
+        st.info('Armazenamento permanente não configurado. Apenas os dados desta sessão estão disponíveis.')
+    elif not positions:
+        st.info('Leitura concluída. Não há posições guardadas nesta conta.')
+    if positions and invested is None:
+        st.info('Posições carregadas. Falta uma avaliação completa correspondente às quantidades guardadas.')
+
+if PAGE == 'Início':
     private = _USERS and st.session_state.get('_app_authenticated') and st.session_state.get('_owner_id')
-    balances = _finance_latest(st.session_state.get('finance_balances', [])) if private and st.session_state.get('_persistence_read_ok') is True else []
+    records = st.session_state.get('finance_balances', []) if private and read_ok else []
+    readable = _balances_readable(records)
+    balances = _finance_latest(records) if readable else []
     _, _, _, dates, net = _balance_summary(balances)
-    positions = st.session_state.get('portfolio_input', [])
-    invested, _, daily = _position_summary(positions, _v31_rows())
-    ref = 'Saldos de '+next(iter(dates)) if len(dates)==1 else 'Saldos de datas diferentes' if dates else 'Sem saldos confirmados'
+    if failed or not enabled:
+        ref = 'Armazenamento indisponível'
+    elif not private:
+        ref = 'Saldos disponíveis com sessão individual'
+    elif not readable:
+        ref = 'Saldo guardado incompleto · total indisponível'
+    else:
+        ref = 'Saldos de '+next(iter(dates)) if len(dates)==1 else 'Saldos de datas diferentes' if dates else 'Sem saldos confirmados'
     daily_text = 'Variação da sessão indisponível' if daily is None else f'{_v31_money(daily)} na sessão'
-    st.title('Visão geral')
     st.markdown(f'<div class="home-summary"><section><h2>Património líquido</h2><strong>{_v31_money(net)}</strong><small>Ativos menos dívidas</small><small>{ref}</small></section><section><h2>Carteira investida</h2><strong>{_v31_money(invested)}</strong><small>{daily_text}</small><small>{_v32_updated_label()}</small></section></div>',unsafe_allow_html=True)
     st.subheader('A acompanhar')
     left,right = st.columns(2)
@@ -5191,14 +5237,14 @@ if PAGE == 'Início':
     st.subheader('As minhas posições')
     if positions:
         _position_links(positions)
-    else:
-        st.caption('Sem posições carregadas.')
 elif PAGE == 'Posições':
-    if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
-    st.title('Carteira')
-    positions = st.session_state.get('portfolio_input', [])
     _position_links(positions)
-    _portfolio_overview(positions, _v31_rows())
+    if rows:
+        columns = ['Ticker XTB', 'Data', 'Quantidade', 'Preço atual', 'Moeda', 'Valor atual EUR', 'P/L EUR aprox.', 'P/L %', 'Erro']
+        st.write('Última avaliação guardada por posição')
+        st.dataframe(pd.DataFrame(rows).reindex(columns=[k for k in columns if any(k in r for r in rows)]), hide_index=True)
+    if positions:
+        _portfolio_overview(positions, rows)
 elif PAGE == 'Briefing completo':
     _v31_render_today()
 elif PAGE == 'Património' or PAGE == 'Fecho mensal':
