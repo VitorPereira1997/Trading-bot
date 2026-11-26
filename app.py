@@ -72,6 +72,7 @@ except Exception:
 
 if _USERS and not st.session_state.get('_app_authenticated',False):
     st.title('🔒 Carteira Inteligente')
+    st.caption('Gestor v33.2 · Finanças e INVEST')
     st.caption('Entra com o teu utilizador. Cada conta tem carteira, histórico e dados próprios.')
     _login_user=st.text_input('Utilizador').strip().lower()
     _login_pw=st.text_input('Palavra-passe',type='password')
@@ -90,6 +91,7 @@ if _USERS and not st.session_state.get('_app_authenticated',False):
 elif (not _USERS) and _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
     # Compatibilidade com a configuração antiga de uma única palavra-passe.
     st.title('🔒 Carteira Inteligente')
+    st.caption('Gestor v33.2 · Finanças e INVEST')
     _pw=st.text_input('Palavra-passe da aplicação',type='password')
     if st.button('Entrar',type='primary',use_container_width=True):
         if hmac.compare_digest(str(_pw),_APP_PASSWORD):
