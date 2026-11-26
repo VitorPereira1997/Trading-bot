@@ -1,0 +1,591 @@
+--- a/app.py
++++ b/app.py
+@@ -4477,8 +4477,6 @@
+     if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
+     rows=_v31_rows(); inputs=st.session_state.get('portfolio_input',[]) or []
+     st.markdown('<div class="sy-page-title">Visão Geral</div><div class="sy-page-sub">A carteira primeiro. O detalhe só aparece quando precisas.</div>',unsafe_allow_html=True)
+-    _portfolio_overview(inputs, rows)
+-    _render_daily_opportunities()
+     if not rows:
+         read_failed=persistence_enabled() and st.session_state.get('_persistence_read_ok') is False
+         st.markdown(f'''<div class="sy-hero"><div class="sy-eyebrow">EM CARTEIRA</div><div class="sy-value">{len(inputs) if inputs else '—'} posições</div><div class="sy-today na">{'Armazenamento indisponível' if read_failed else 'Ainda sem snapshot de mercado'}</div></div>''',unsafe_allow_html=True)
+@@ -4510,552 +4508,10 @@
+     st.caption('Os preços mostrados são os do último snapshot guardado; a app não os apresenta como streaming em tempo real.')
+ 
+ 
+-def _opportunity_record(ticker, holding, position):
+-    analysis = analyze_asset(ticker, detailed=False, instrument_type=position.get('Tipo instrumento'),
+-                             source_override=position.get('Ticker técnico'))
+-    sources = sorted(set(analysis.get('data_sources', {}).values()))
+-    provenance = ', '.join(sources) or 'fonte indisponível'
+-    provenance += ' · data de referência das métricas indisponível'
+-    imported = analysis.get('investingpro_record') or {}
+-    if 'InvestingPro' in sources:
+-        provenance += f" · importação InvestingPro: {imported.get('imported_at') or 'data indisponível'}"
+-    archive = (st.session_state.get('report_library') or {}).get(analysis['xtb_ticker']) or {}
+-    report = archive.get('report') or {}
+-    if report:
+-        provenance += f" · relatório InvestingPro arquivado: {report.get('report_date') or 'data indisponível'}"
+-    action, score = _long_action(analysis, holding=holding)
+-    row = analysis['row']
+-    close = float(row['Close'])
+-    zone = entry_zone(analysis)
+-    day = pd.Timestamp(row.name).date()
+-    currency = analysis['currency']
+-    if currency == 'N/D' or not all(math.isfinite(v) and v > 0 for v in
+-                                      (close, zone['low'], zone['high'], float(row['ATR14']))):
+-        raise ValueError('Preço, moeda ou intervalo indisponível.')
+-    eligible = ('CANDIDATO' in action and zone['status'].startswith('NA ZONA')
+-                and 0 <= (datetime.now(timezone.utc).date() - day).days <= 3)
+-    reason = ' · '.join([action, _long_evidence(analysis)[0], zone['status']])
+-    if not 0 <= (datetime.now(timezone.utc).date() - day).days <= 3:
+-        reason += ' · fecho desatualizado ou data inconsistente'
+-    return dict(ticker=ticker, source=analysis['source_ticker'], day=day.isoformat(),
+-                currency=currency, price=close, low=zone['low'], high=zone['high'],
+-                report_note=(f"InvestingPro · justo valor indicado no relatório de {report.get('report_date') or 'data indisponível'}: {report['fair_value']} (moeda segundo o relatório)." if report.get('fair_value') is not None else None),
+-                score=score, provenance=provenance, reason=reason, eligible=eligible, holding=holding,
+-                risk=f"Oscilação diária típica (ATR de 14 sessões): {float(row['ATR14']) / close:.1%}.")
+-
+-
+-def _opportunity_weight(ticker, amount, positions, rows, currency):
+-    from collections import Counter
+-    def identity(row):
+-        return str(row.get('Ticker XTB', '')).upper(), _safe_float(row.get('Quantidade'))
+-    if not amount or not positions or Counter(map(identity, positions)) != Counter(map(identity, rows)):
+-        return None
+-    total = owned = 0.
+-    for r in rows:
+-        stamp = pd.to_datetime(r.get('Data'), errors='coerce')
+-        if pd.isna(stamp) or not 0 <= (datetime.now(timezone.utc).date() - stamp.date()).days <= 3:
+-            return None
+-        value = _safe_float(r.get('Valor atual EUR'))
+-        if r.get('Erro') or value is None or not math.isfinite(value) or value <= 0:
+-            return None
+-        total += value
+-        if identity(r)[0] == ticker:
+-            owned += value
+-    if currency != 'EUR' and not fx_per_eur(currency):
+-        return None
+-    return (owned + amount) / (total + amount)
+-
+-
+-@st.cache_data(ttl=21600)
+-def _holding_calendar(symbol):
+-    import yfinance as yf
+-    calendar = yf.Ticker(symbol).calendar or {}
+-    events = []
+-    for field, label in [('Earnings Date', 'Resultados previstos'), ('Ex-Dividend Date', 'Ex-dividendo'),
+-                         ('Dividend Date', 'Pagamento de dividendo')]:
+-        values = calendar.get(field, [])
+-        if not isinstance(values, (list, tuple)):
+-            values = [values]
+-        dates = sorted({pd.Timestamp(v).date() for v in values if pd.notna(v)})
+-        if dates and dates[-1] >= datetime.now(timezone.utc).date():
+-            events.append(label + ' · ' + ' a '.join(str(v) for v in dates))
+-    return events
+-
+-
+-@st.dialog('Análise da posição')
+-def _holding_detail(position):
+-    ticker = position['Ticker XTB']
+-    st.subheader(ticker)
+-    try:
+-        analysis = analyze_asset(ticker, detailed=False, instrument_type=position.get('Tipo instrumento'),
+-                                 source_override=position.get('Ticker técnico'))
+-        action, score = _long_action(analysis, holding=True)
+-        st.write(action, ' · ', _fmt_num(score, 0, '/100'))
+-        st.caption(f"Yahoo Finance · {analysis['source_ticker']} · fecho ajustado {analysis['row']['Close']:g} {analysis['currency']} em {analysis['row'].name.date()}")
+-        for item in _long_evidence(analysis):
+-            st.write(item)
+-    except Exception:
+-        st.info('Análise indisponível para esta posição.')
+-
+-
+-def _portfolio_overview(positions, rows):
+-    from collections import Counter
+-    st.subheader('Visão geral da carteira')
+-    st.caption(_v32_updated_label() + ' · posições declaradas, por confirmar.')
+-    def identity(r):
+-        return str(r.get('Ticker XTB', '')), _safe_float(r.get('Quantidade'))
+-    complete = bool(positions) and Counter(map(identity, positions)) == Counter(map(identity, rows))
+-    def total(field):
+-        vals = [_safe_float(r.get(field)) for r in rows]
+-        if complete and all(v is not None and math.isfinite(v) for v in vals):
+-            return sum(vals)
+-        return None
+-    columns = st.columns(4)
+-    dates = {str(r.get('Data') or '') for r in rows}
+-    daily = total('Variação dia EUR') if len(dates) == 1 and '' not in dates else None
+-    for col, label, value in zip(columns, ['Valor total da conta', 'Variação da sessão', 'Retorno total', 'Desde janeiro'],
+-                                 [None, daily, None, None]):
+-        col.metric(label, _v31_money(value) if value is not None else 'N/D')
+-    with st.expander('Desempenho, movimentos e detalhe das posições'):
+-        st.write('Valor das posições: ' + _v31_money(total('Valor atual EUR')))
+-        st.write('Ganhos/perdas por realizar (aprox.): ' + _v31_money(total('P/L EUR aprox.')))
+-        st.caption('Totais indisponíveis se faltar uma posição, cotação ou conversão. O valor das posições exclui dinheiro em conta. O resultado por realizar usa o câmbio do snapshot.')
+-        st.write('Valor total da conta: N/D · falta o saldo de caixa verificado.')
+-        st.write('Retorno total e desempenho no ano: N/D · faltam avaliações históricas e fluxos externos datados.')
+-        st.write('Realizado, dividendos recebidos, comissões, taxas e impostos pagos e depósitos: N/D · a carteira guarda posições e decisões, sem extrato completo de movimentos liquidados.')
+-        if rows:
+-            moves = [r for r in rows if _safe_float(r.get('Variação dia %')) is not None]
+-            if moves:
+-                st.write('Maiores movimentos nas sessões indicadas')
+-                st.dataframe(pd.DataFrame(sorted(moves, key=lambda r: abs(float(r['Variação dia %'])), reverse=True)[:5]).reindex(columns=['Ticker XTB','Data','Variação dia %']),hide_index=True)
+-        for i, position in enumerate(positions):
+-            if position.get('Ticker XTB') and st.button(str(position['Ticker XTB']), key=f'opp_position_{i}'):
+-                _holding_detail(position)
+-        if positions and st.button('Consultar próximos resultados e dividendos', key='opp_events'):
+-            for ticker in dict.fromkeys(r.get('Ticker XTB') for r in positions if r.get('Ticker XTB')):
+-                r = next(r for r in positions if r.get('Ticker XTB') == ticker)
+-                try:
+-                    symbol = r.get('Ticker técnico') or resolve_instrument(ticker)['source_ticker']
+-                    events = _holding_calendar(symbol)
+-                except Exception:
+-                    events = []
+-                st.write(ticker + ' · ' + (' / '.join(events) or 'Sem datas verificáveis') + ' · Yahoo Finance')
+-
+-
+-FINANCE_COLUMNS = ['Conta', 'Tipo', 'Moeda', 'Data', 'Caixa', 'Investimentos', 'Dívidas', 'EUR por unidade', 'Fonte']
+-
+-
+-def _finance_rows(frame):
+-    if list(frame.columns) != FINANCE_COLUMNS:
+-        raise ValueError('Usa as colunas do modelo pela ordem indicada.')
+-    if frame.empty or len(frame) > 1000:
+-        raise ValueError('O ficheiro deve conter entre 1 e 1000 saldos.')
+-    records = []
+-    keys = set()
+-    for line, values in enumerate(frame.fillna('').to_dict('records'), 2):
+-        r = {k: str(v).strip() for k, v in values.items()}
+-        try:
+-            if not r['Conta'] or not r['Fonte'] or r['Tipo'] not in ('Banco', 'Corretora', 'Crédito', 'Outra'):
+-                raise ValueError('Indica conta, tipo e fonte.')
+-            r['Moeda'] = r['Moeda'].upper()
+-            if not re.fullmatch('[A-Z]{3}', r['Moeda']):
+-                raise ValueError('Indica a moeda em três letras.')
+-            day = date.fromisoformat(r['Data'].split(' ')[0])
+-            if day > date.today():
+-                raise ValueError('A data do saldo está no futuro.')
+-            r['Data'] = day.isoformat()
+-            for k in FINANCE_COLUMNS[4:8]:
+-                value = float(r[k].replace(',', '.')) if r[k] else None
+-                if value is not None and (not math.isfinite(value) or value < 0):
+-                    raise ValueError('Usa montantes positivos e regista descobertos em Dívidas.')
+-                r[k] = value
+-            if r['Moeda'] == 'EUR':
+-                if r['EUR por unidade'] not in (None, 1):
+-                    raise ValueError('O câmbio de EUR para EUR é 1.')
+-                r['EUR por unidade'] = 1.
+-            elif r['EUR por unidade'] == 0:
+-                raise ValueError('O câmbio tem de ser positivo.')
+-            key = (r['Conta'].casefold(), r['Moeda'], r['Data'])
+-            if key in keys:
+-                raise ValueError('Saldo duplicado para a mesma conta, moeda e data.')
+-            keys.add(key)
+-            records.append(r)
+-        except ValueError as exc:
+-            raise ValueError(f'Linha {line}: {exc}') from exc
+-    return records
+-
+-
+-def _finance_latest(records):
+-    latest = {}
+-    for r in records:
+-        key = r['Conta'].casefold(), r['Moeda']
+-        if key not in latest or r['Data'] >= latest[key]['Data']:
+-            latest[key] = r
+-    return list(latest.values())
+-
+-
+-def _finance_total(rows, field):
+-    if not rows or any(r[field] is None or r['EUR por unidade'] is None for r in rows):
+-        return None
+-    return sum(r[field] * r['EUR por unidade'] for r in rows)
+-
+-
+-INVEST_TYPES = ('Rendimento líquido', 'Outros rendimentos', 'Despesa', 'Compra com cartão',
+-               'Pagamento de cartão', 'Transferência interna')
+-INVEST_CATEGORIES = ('Por classificar', 'Necessidade', 'Conforto', 'Luxo', 'Outros')
+-
+-
+-def _invest_summary(movements):
+-    totals = {k: 0 for k in (*INVEST_TYPES[:2], *INVEST_CATEGORIES)}
+-    for row in movements:
+-        kind = row['Tipo']
+-        if kind in INVEST_TYPES[:2]:
+-            totals[kind] += row['Cêntimos']
+-        elif kind in INVEST_TYPES[2:4]:
+-            totals[row['Categoria']] += row['Cêntimos']
+-    spend = sum(totals[k] for k in INVEST_CATEGORIES)
+-    return {**totals, 'Despesas': spend, 'Margem orçamental': sum(totals[k] for k in INVEST_TYPES[:2]) - spend}
+-
+-
+-def _save_invest_month(month, value):
+-    months = st.session_state.get('finance_months', {})
+-    if months.get(month, {}).get('closed'):
+-        st.error('Este mês já foi fechado.')
+-        return
+-    st.session_state.finance_months = {**months, month: value}
+-    if save_persistent_state(show_error=True):
+-        st.rerun()
+-    st.session_state.finance_months = months
+-
+-
+-def _house_close_note(goal, prior, end):
+-    if goal.get('eligible') is None:
+-        return 'Falta o saldo de fim de mês dos ativos afetos à Casa.'
+-    if goal['eligible'] >= 60000:
+-        return 'O saldo afeto à Casa alcançou a meta de 60 000 €.'
+-    if prior.get('eligible') is None or goal.get('saved') is None:
+-        return 'Faltam dois fechos consecutivos com saldo elegível e a poupança líquida afeta à Casa neste mês.'
+-    if not goal.get('target') and goal.get('months') is None:
+-        return 'Falta indicar a data-alvo ou os meses restantes do plano.'
+-    close = date.fromisoformat(end)
+-    if goal.get('target'):
+-        target = date.fromisoformat(goal['target'])
+-        if target < close:
+-            return 'A data-alvo já passou. Revê o prazo do plano.'
+-        remaining = (target.year-close.year)*12 + target.month-close.month
+-    else:
+-        remaining = goal['months']
+-    # Inclui o mês medido: o saldo de partida é o do fecho anterior.
+-    needed = max(0, 60000-prior['eligible']) / (remaining+1)
+-    return (f"Poupança para a Casa: {_v31_money(goal['saved'])} neste mês, "
+-            f"{'ao nível ou acima' if goal['saved'] >= needed else 'abaixo'} do ritmo linear "
+-            f"de {_v31_money(needed)}/mês para atingir 60 000 €, sem pressupor rendibilidade.")
+-
+-
+-def _invest_review(records):
+-    from calendar import monthrange
+-    today = date.today()
+-    selected = st.date_input('Mês de referência (qualquer dia do mês)', value=today, key='finance_month')
+-    month = selected.strftime('%Y-%m')
+-    end = selected.replace(day=monthrange(selected.year, selected.month)[1]).isoformat()
+-    months = st.session_state.get('finance_months', {})
+-    entry = months.get(month, {})
+-    closed = entry.get('closed')
+-    moves = entry.get('moves', [])
+-    totals = _invest_summary(moves)
+-    monthly_rows = _finance_latest([r for r in records if r['Data'] <= end])
+-    rows = entry['balances'] if closed else monthly_rows
+-    st.write(('Fecho guardado · ' if closed else 'Em revisão · ') + month)
+-    st.caption('Montantes orçamentais em EUR. A data aplicável de uma compra determina o mês. A dívida é o capital em falta na data do saldo.')
+-    st.write('O que falta para fechar ' + month)
+-    verified = dict(entry.get('verified') or {})
+-    if not closed:
+-        for key, label in [('income','Confirmei todos os rendimentos do mês'),
+-                           ('expenses','Confirmei todas as despesas do mês'),
+-                           ('accounts','Confirmei a lista de contas e créditos deste mês')]:
+-            verified[key] = st.checkbox(label, value=verified.get(key, False), key='finance_verify_'+key+month)
+-    def flow_status(key, kinds):
+-        found = any(r['Tipo'] in kinds for r in moves)
+-        if verified.get(key):
+-            return 'registos conferidos' if found else 'ausência de movimentos confirmada'
+-        return 'registos por conferir' if found else 'fonte não verificada'
+-    pending_count = sum(r['Categoria']=='Por classificar' for r in moves)
+-    checks = {'Rendimentos':flow_status('income', INVEST_TYPES[:2]),
+-              'Despesas':flow_status('expenses', INVEST_TYPES[2:4]),
+-              'Classificação':'há movimentos por classificar' if pending_count else ('concluída' if verified.get('expenses') else 'sem pendências conhecidas; cobertura por verificar')}
+-    for field, title in [('Caixa','Disponibilidades'),('Investimentos','Investimentos'),('Dívidas','Capital em dívida')]:
+-        pending_rows = [r for r in rows if r['Data']!=end or r[field] is None]
+-        if not rows:
+-            status = 'sem registos; fonte não verificada'
+-        elif pending_rows:
+-            status = 'faltam saldos ou datas de fecho'
+-        elif not verified.get('accounts'):
+-            status = 'saldos registados; cobertura de contas por confirmar'
+-        else:
+-            status = 'zero confirmado' if all(r[field]==0 for r in rows) else 'saldos conferidos'
+-        checks[title] = status
+-        for r in pending_rows:
+-            st.caption(f"{r['Conta']} · {title} · " + ('valor em falta' if r[field] is None else 'valor registado') + f" · saldo de {r['Data']}, fecho de {end}")
+-    if any(r['EUR por unidade'] is None for r in rows):
+-        checks['Conversão'] = 'falta câmbio para pelo menos uma conta'
+-    st.code(month + '\n' + '\n'.join(f'{label}: {value}' for label,value in checks.items()), language=None)
+-    if not closed and st.button('Guardar conferências no rascunho', key='finance_verify_save_'+month):
+-        _save_invest_month(month, {**entry, 'verified':verified})
+-    if moves or closed:
+-        st.dataframe([{'Rubrica': k, 'EUR': v/100} for k, v in totals.items()], hide_index=True)
+-    else:
+-        st.info('Sem movimentos confirmados para este mês.')
+-    if rows:
+-        st.dataframe(pd.DataFrame(rows), hide_index=True)
+-    if not rows or any(r['Data'] != end for r in rows):
+-        st.warning('Faltam saldos de fim do mês ou as datas dos saldos não coincidem com o fecho.')
+-    prev_month = (selected.replace(day=1) - pd.Timedelta(days=1)).strftime('%Y-%m')
+-    prev = months.get(prev_month, {})
+-    def accounts(rs):
+-        return {(r['Conta'].casefold(), r['Moeda']) for r in rs}
+-    goal = dict(entry.get('goal') or {})
+-    st.write('Casa · meta de 60 000 € em 4–5 anos')
+-    if not closed:
+-        prefix = 'finance_goal_' + month
+-        goal['eligible'] = st.number_input('Saldo elegível para a Casa no fecho (€)', value=goal.get('eligible'), min_value=0., key=prefix+'_eligible')
+-        goal['saved'] = st.number_input('Poupança líquida efetivamente afeta à Casa no mês (€)', value=goal.get('saved'), key=prefix+'_saved')
+-        st.caption('Inclui reforços menos levantamentos. Exclui valorizações e transferências entre ativos já afetos à Casa.')
+-        goal['months'] = st.number_input('Horizonte restante após este fecho (meses)', min_value=0, value=goal.get('months'), key=prefix+'_months')
+-        target = st.date_input('Data-alvo opcional (prevalece sobre o horizonte)', value=date.fromisoformat(goal['target']) if goal.get('target') else None, key=prefix+'_target')
+-        goal['target'] = target.isoformat() if target else None
+-        if st.button('Guardar dados da meta neste rascunho', key=prefix+'_save'):
+-            _save_invest_month(month, {**entry, 'goal':goal})
+-    st.caption(_house_close_note(goal, prev.get('goal', {}) if prev.get('closed') else {}, end))
+-    if closed and prev.get('closed') and accounts(rows) and accounts(rows) == accounts(prev['balances']):
+-        previous = _invest_summary(prev['moves'])
+-        income_change = sum(totals[k]-previous[k] for k in INVEST_TYPES[:2])/100
+-        largest = max(totals[k] for k in INVEST_CATEGORIES[1:])
+-        leading = ', '.join(k for k in INVEST_CATEGORIES[1:] if totals[k]==largest)
+-        st.write('Rendimento face ao mês anterior: ' + _v31_money(income_change) +
+-                 (f'. Maior despesa: {leading} ({_v31_money(largest/100)} por categoria).' if largest else '. Sem despesas registadas.'))
+-        st.write('Variação da margem orçamental face ao mês anterior: ' + _v31_money((totals['Margem orçamental'] - previous['Margem orçamental']) / 100))
+-        if entry.get('net') is not None and prev.get('net') is not None:
+-            changes = {k: (_finance_total(rows,k)-_finance_total(prev['balances'],k)) * (-1 if k=='Dívidas' else 1)
+-                       for k in FINANCE_COLUMNS[4:7]}
+-            magnitude = max(abs(v) for v in changes.values())
+-            if magnitude:
+-                st.caption('Maior contributo contabilístico: ' + ', '.join(f'{k} ({_v31_money(v)})' for k,v in changes.items() if abs(v)==magnitude) + '.')
+-            st.write('Variação do património face ao fecho anterior: ' + _v31_money(entry['net'] - prev['net']))
+-    else:
+-        st.caption('Comparação mensal indisponível até existirem dois fechos consecutivos com as mesmas contas.')
+-    if moves:
+-        st.dataframe([{**{k:v for k,v in r.items() if k!='Cêntimos'}, 'EUR': r['Cêntimos']/100} for r in moves], hide_index=True)
+-    if closed:
+-        return
+-    expenses = [r for r in moves if r['Tipo'] in INVEST_TYPES[2:4]]
+-    pending = [r['Referência'] for r in expenses if r['Categoria'] == 'Por classificar']
+-    if pending:
+-        st.warning('Por classificar: ' + ', '.join(pending))
+-    with st.form('finance_move_'+month, clear_on_submit=True):
+-        day = st.date_input('Data aplicável do movimento', value=selected)
+-        ref = st.text_input('Referência única do movimento no mês')
+-        description = st.text_input('Descrição opcional do movimento')
+-        kind = st.selectbox('Natureza do movimento', INVEST_TYPES)
+-        amount = st.number_input('Valor em EUR', value=None, min_value=0.01, step=0.01)
+-        cat = st.selectbox('Categoria da despesa', INVEST_CATEGORIES)
+-        if st.form_submit_button('Guardar movimento'):
+-            ref = ref.strip()
+-            if not ref or not amount or not math.isfinite(amount) or day.strftime('%Y-%m') != month:
+-                st.error('Indica uma referência, um valor e uma data do mês selecionado.')
+-            elif any(r['Referência'].casefold() == ref.casefold() for r in moves):
+-                st.error('Esta referência já existe neste mês.')
+-            else:
+-                new = {'Data':day.isoformat(), 'Referência':ref, 'Descrição':description.strip(), 'Tipo':kind, 'Cêntimos':round(amount*100),
+-                       'Categoria':cat if kind in INVEST_TYPES[2:4] else ''}
+-                _save_invest_month(month, {**entry, 'moves':[*moves, new]})
+-    if expenses:
+-        with st.form('finance_correct_'+month):
+-            ref = st.selectbox('Despesa a corrigir', [r['Referência'] for r in expenses])
+-            cat = st.selectbox('Nova categoria', INVEST_CATEGORIES)
+-            if st.form_submit_button('Corrigir categoria'):
+-                _save_invest_month(month, {**entry, 'moves':[{**r, 'Categoria':cat} if r['Referência']==ref else r for r in moves]})
+-    statement_day = st.date_input('Data até à qual todos os extratos cobrem o mês (inclui cartões)', value=None, key='finance_statement_'+month)
+-    if statement_day and (statement_day.isoformat()!=end or any(r['Data']!=statement_day.isoformat() for r in rows)):
+-        st.warning('As datas dos extratos e dos saldos não permitem comparar o património deste fecho.')
+-    complete = st.checkbox('Conferi todos os movimentos e contas do mês, incluindo eventuais valores nulos.', key='finance_checked_'+month)
+-    if st.button('Fechar mês e guardar cópia', key='finance_close_'+month,
+-                 disabled=bool(pending) or not all(verified.values()) or not complete or statement_day is None or statement_day.isoformat()!=end or end > today.isoformat()):
+-        values = [_finance_total(rows, k) for k in FINANCE_COLUMNS[4:7]]
+-        net = values[0]+values[1]-values[2] if rows and all(r['Data']==end for r in rows) and None not in values else None
+-        _save_invest_month(month, {'moves': moves, 'balances': rows, 'net': net, 'goal':goal, 'verified':verified,
+-                                  'closed': _now_utc_iso(), 'statement_date': statement_day.isoformat()})
+-
+-
+-def _render_finances():
+-    if persistence_enabled() and not st.session_state.get('_persistent_loaded'):
+-        load_persistent_state(fast=True)
+-    st.subheader('Património por conta')
+-    private = bool(_USERS and st.session_state.get('_app_authenticated') and st.session_state.get('_owner_id'))
+-    if not private:
+-        st.info('Os saldos pessoais só estão disponíveis com sessão individual autenticada.')
+-        return
+-    if st.session_state.get('_persistence_read_ok') is not True:
+-        st.info('Armazenamento privado indisponível. A completude do mês não pode ser verificada.')
+-        return
+-    records = st.session_state.get('finance_balances', [])
+-    rows = _finance_latest(records)
+-    cash, investments, debt = [_finance_total(rows, field) for field in FINANCE_COLUMNS[4:7]]
+-    dates = {r['Data'] for r in rows}
+-    net = cash + investments - debt if None not in (cash, investments, debt) and len(dates) == 1 else None
+-    st.metric('Património líquido das contas registadas', _v31_money(net))
+-    if len(dates) == 1:
+-        st.caption('Data de referência: ' + next(iter(dates)))
+-    elif dates:
+-        st.info('As contas têm datas diferentes. Consulta os saldos por conta abaixo.')
+-    st.caption('Caixa + investimentos − dívidas. O total exige saldos e câmbios para a mesma data. Valores em branco são desconhecidos.')
+-    for col, label, value in zip(st.columns(3), ['Disponibilidades', 'Investimentos', 'Dívidas'], [cash, investments, debt]):
+-        col.metric(label, _v31_money(value) if len(dates) == 1 else 'N/D')
+-    if rows:
+-        st.dataframe(pd.DataFrame(rows), hide_index=True)
+-    with st.expander('Revisão mensal · INVEST'):
+-        _invest_review(records)
+-    with st.expander('Adicionar saldos ou importar um extrato'):
+-        st.caption('Uma linha por conta, moeda e data. Caixa inclui o dinheiro livre da corretora. Investimentos exclui esse dinheiro. As posições da carteira não são somadas novamente. Transferências não são ganhos nem saldos adicionais.')
+-        st.caption('Modelo de saldos CSV UTF-8 separado por ponto e vírgula, ou Excel .xlsx com as mesmas colunas na primeira folha. Extratos nativos XTB, PDF e históricos de transações exigem outro leitor. Usa um nome estável por conta. Identifica a fonte dos saldos e do câmbio da data indicada.')
+-        st.download_button('Modelo CSV', ';'.join(FINANCE_COLUMNS)+'\n', 'modelo-saldos.csv', 'text/csv')
+-        mode = st.radio('Origem', ['Introdução manual', 'Ficheiro'], horizontal=True, key='finance_mode')
+-        if mode == 'Ficheiro':
+-            f = st.file_uploader('Extrato no formato do modelo', type=['csv','xlsx'], key='finance_file')
+-            if f is None:
+-                return
+-            try:
+-                frame = pd.read_excel(f, dtype=str) if f.name.lower().endswith('.xlsx') else pd.read_csv(f, sep=';', dtype=str, keep_default_na=False)
+-            except Exception:
+-                st.error('Não foi possível ler o ficheiro no formato indicado.')
+-                return
+-        else:
+-            row = {}
+-            for k in FINANCE_COLUMNS:
+-                if k == 'Tipo':
+-                    row[k] = st.selectbox(k, ['Banco','Corretora','Crédito','Outra'], key='finance_type')
+-                elif k == 'Data':
+-                    row[k] = st.date_input('Data de referência', key='finance_date').isoformat()
+-                else:
+-                    row[k] = st.text_input(k, value='EUR' if k == 'Moeda' else '', key='finance_'+k)
+-            if not row['Conta'] or not row['Fonte']:
+-                return
+-            frame = pd.DataFrame([row], columns=FINANCE_COLUMNS)
+-        try:
+-            pending = _finance_rows(frame)
+-        except ValueError as exc:
+-            st.error(str(exc))
+-            return
+-        def record_key(r):
+-            return r['Conta'].casefold(), r['Moeda'], r['Data']
+-        existing = {record_key(r): r for r in records}
+-        changed = [r for r in pending if r != existing.get(record_key(r))]
+-        st.write('Pré-visualização')
+-        st.dataframe(pd.DataFrame(pending), hide_index=True)
+-        st.caption(f'{len(changed)} saldos novos ou alterados. Uma correção substitui o saldo da mesma conta, moeda e data. Só os campos apresentados são guardados no espaço individual.')
+-        if st.button('Confirmar e guardar saldos', disabled=not changed, key='finance_save'):
+-            existing.update({record_key(r):r for r in changed})
+-            st.session_state.finance_balances = list(existing.values())
+-            if save_persistent_state(show_error=True):
+-                st.success('Saldos guardados.')
+-                st.rerun()
+-            st.session_state.finance_balances = records
+-
+-
+-def _render_daily_opportunities():
+-    st.subheader('Oportunidades do dia · longo prazo')
+-    st.caption('Orçamento mensal de referência: 300 €. O saldo disponível não foi apurado.')
+-    if st.session_state.get('_persistence_read_ok') is False:
+-        st.info('Aguardar · carteira guardada indisponível.')
+-    positions = st.session_state.get('portfolio_input', []) if st.session_state.get('_persistence_read_ok') is not False else []
+-    held = {str(r['Ticker XTB']).upper(): r for r in positions if isinstance(r, dict) and r.get('Ticker XTB')}
+-    watch = st.session_state.get('watchlist', [])
+-    universe = {t: r for t, r in held.items() if r.get('Objetivo') != 'Curto prazo'}
+-    universe.update({t: {} for t in watch if isinstance(t, str) and t not in held})
+-    generic = st.multiselect('Análise geral · escolher ativos do universo da aplicação',
+-                             sorted({t for tickers in MARKETS.values() for t in tickers}), key='opp_generic')
+-    universe.update({t: {} for t in generic if t not in held})
+-    st.caption('A carteira guardada pode estar desatualizada. A análise geral também funciona sem carteira.')
+-    confirmed = st.checkbox('As posições guardadas correspondem à minha carteira atual', key='opp_confirm') if positions else False
+-    history = st.session_state.get('opp_refusals', [])
+-    if history:
+-        with st.expander('Sugestões recusadas'):
+-            st.dataframe(pd.DataFrame(history), hide_index=True)
+-    if not universe:
+-        st.info('Aguardar · sem posições de longo prazo ou ativos na lista de acompanhamento.')
+-        return
+-    amount = st.number_input('Montante de nova contribuição a simular (€)', min_value=0., value=None, key='opp_amount')
+-    scope = (tuple((t, str(r)) for t, r in universe.items()), datetime.now(timezone.utc).date())
+-    if st.button('Comparar reforço, nova posição e aguardar', key='opp_compare'):
+-        records, missing = [], []
+-        with st.spinner('A consultar as cotações de fecho…'):
+-            for ticker, position in universe.items():
+-                try:
+-                    records.append(_opportunity_record(ticker, ticker in held, position))
+-                except Exception:
+-                    missing.append(ticker)
+-        st.session_state.opp_results = (scope, records, missing)
+-    cache = st.session_state.get('opp_results')
+-    if not cache or cache[0] != scope:
+-        return
+-    records, missing = cache[1:]
+-    if missing:
+-        st.caption('Dados indisponíveis: ' + ', '.join(missing))
+-    shown = 0
+-    for rec in sorted(records, key=lambda r: r['score'] or 0, reverse=True):
+-        t, price, unit = rec['ticker'], rec['price'], rec['currency']
+-        previous = next((h for h in reversed(history) if h['Ativo'] == t), None)
+-        change = ''
+-        if previous:
+-            if previous['Moeda'] != unit or previous['Fonte'] != rec['source']:
+-                continue
+-            threshold = previous.get('Rever abaixo ou igual a')
+-            if threshold is not None:
+-                if price > threshold or rec['day'] <= previous['Sessão']:
+-                    continue
+-                change = f'O fecho atingiu o limiar de revisão de {threshold:g} {unit}.'
+-            elif rec['reason'] != previous['Justificação'] or not previous['Mínimo'] <= price <= previous['Máximo']:
+-                change = 'A justificação mudou.' if rec['reason'] != previous['Justificação'] else 'O preço saiu do intervalo original.'
+-            else:
+-                continue
+-        label = (('Reforçar' if rec['holding'] else 'Abrir posição') if confirmed else 'Candidato geral') if rec['eligible'] else 'Aguardar'
+-        with st.expander(f"{label} · {t} · {price:g} {unit}", expanded=rec['eligible']):
+-            st.caption(f"Yahoo Finance · {rec['source']} · fecho ajustado de {rec['day']} · cotação diária atrasada, hora indisponível.")
+-            st.caption('Fundamentais: ' + rec['provenance'])
+-            if rec.get('report_note'):
+-                st.caption(rec['report_note'])
+-            st.write(rec['reason'])
+-            st.write(f"Entrada indicativa: {rec['low']:g}–{rec['high']:g} {unit}, com base em médias móveis e volatilidade. Risco: {rec['risk']}")
+-            weight = _opportunity_weight(t, amount, positions, _v31_rows(), unit) if confirmed else None
+-            st.write(f'Peso simulado com nova contribuição, pelo último snapshot: {weight:.1%}' if weight is not None else 'Peso resultante indisponível.')
+-            if previous:
+-                st.write(f"Recusa em {previous['Data']}: {previous['Preço']:g} {unit}. {previous['Justificação']} {change}")
+-            if rec['eligible']:
+-                shown += 1
+-                reason = st.text_input('Motivo da recusa (opcional)', key='opp_note_'+t)
+-                threshold = st.number_input('Rever se o fecho descer até (opcional)', min_value=0.,
+-                                            value=None, key='opp_limit_'+t)
+-                ready = persistence_enabled() and st.session_state.get('_persistence_read_ok') is True
+-                if not ready:
+-                    st.caption('Histórico permanente indisponível.')
+-                if st.button('Recusar sugestão', key='opp_decline_'+t, disabled=not ready):
+-                    event = {'Ativo':t, 'Data':_now_utc_iso(), 'Sessão':rec['day'], 'Preço':price,
+-                             'Moeda':unit, 'Fonte':rec['source'], 'Justificação':rec['reason'],
+-                             'Mínimo':rec['low'], 'Máximo':rec['high'], 'Motivo':reason,
+-                             'Rever abaixo ou igual a':threshold}
+-                    st.session_state.opp_refusals = history + [event]
+-                    if save_persistent_state(show_error=True):
+-                        st.rerun()
+-                    st.session_state.opp_refusals = history
+-    if not shown:
+-        st.info('Aguardar · nenhuma entrada elegível entre os ativos analisados.')
+-
+-
+ def _v33_render_today_inner():
+     if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
+     rows=_v31_rows(); inputs=st.session_state.get('portfolio_input',[]) or []
+     st.markdown('<div class="sy-page-title">Briefing Hoje</div><div class="sy-page-sub">Carteira, objetivo Casa 60k e a única ação que merece atenção agora.</div>',unsafe_allow_html=True)
+-    _portfolio_overview(inputs, rows)
+-    _render_daily_opportunities()
+     if not rows:
+         read_failed=persistence_enabled() and st.session_state.get('_persistence_read_ok') is False
+         st.markdown(f'''<div class="sy-hero"><div class="sy-eyebrow">CARTEIRA</div><div class="sy-value">{len(inputs) if inputs else '—'} posições</div><div class="sy-today na">{'Armazenamento indisponível' if read_failed else 'Ainda sem snapshot de mercado'}</div></div>''',unsafe_allow_html=True)
+@@ -5107,7 +4563,6 @@
+         _v32_safe_today_fallback()
+ 
+ def _v31_render_positions(rows):
+-    _portfolio_overview(st.session_state.get('portfolio_input', []), rows)
+     good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]
+     if not good: st.markdown('<div class="sy-empty">Ainda não existem posições com dados de mercado no snapshot.</div>',unsafe_allow_html=True); return
+     s=_v31_portfolio_stats(good)
+@@ -5124,7 +4579,7 @@
+     if note:
+         st.caption(note)
+ 
+-TOP_PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Descobrir', 'Analisar', 'Objetivo', 'Finanças'], horizontal=True, label_visibility='collapsed', key='main_page_v31', format_func=lambda x:{'Hoje':'⌂  Hoje','Carteira':'▣  Carteira','Descobrir':'◉  Descobrir','Analisar':'⌕  Analisar','Objetivo':'⌂  Casa 60k','Finanças':'Finanças'}[x])
++TOP_PAGE = st.radio('Navegação', ['Hoje', 'Carteira', 'Descobrir', 'Analisar', 'Objetivo'], horizontal=True, label_visibility='collapsed', key='main_page_v31', format_func=lambda x:{'Hoje':'⌂  Hoje','Carteira':'▣  Carteira','Descobrir':'◉  Descobrir','Analisar':'⌕  Analisar','Objetivo':'⌂  Casa 60k'}[x])
+ PAGE = TOP_PAGE
+ if TOP_PAGE == 'Carteira':
+     _carteira_view = st.radio('Carteira', ['Posições', 'Risco e alertas'], horizontal=True, label_visibility='collapsed', key='carteira_view_v31')
+@@ -5137,9 +4592,6 @@
+ 
+ if PAGE == 'Hoje':
+     _v31_render_today()
+-
+-elif PAGE == 'Finanças':
+-    _render_finances()
+ 
+ elif PAGE == 'Objetivo':
+     if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
