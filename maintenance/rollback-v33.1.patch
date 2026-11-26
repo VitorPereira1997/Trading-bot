@@ -1,6 +1,24 @@
 --- a/app.py
 +++ b/app.py
-@@ -4477,8 +4477,6 @@
+@@ -72,7 +72,7 @@
+ 
+ if _USERS and not st.session_state.get('_app_authenticated',False):
+     st.title('🔒 Carteira Inteligente')
+-    st.caption('Gestor v33.2 · Finanças e INVEST')
++    st.caption('Gestor v33.1 · Interface de recuperação')
+     st.caption('Entra com o teu utilizador. Cada conta tem carteira, histórico e dados próprios.')
+     _login_user=st.text_input('Utilizador').strip().lower()
+     _login_pw=st.text_input('Palavra-passe',type='password')
+@@ -91,7 +91,7 @@
+ elif (not _USERS) and _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
+     # Compatibilidade com a configuração antiga de uma única palavra-passe.
+     st.title('🔒 Carteira Inteligente')
+-    st.caption('Gestor v33.2 · Finanças e INVEST')
++    st.caption('Gestor v33.1 · Interface de recuperação')
+     _pw=st.text_input('Palavra-passe da aplicação',type='password')
+     if st.button('Entrar',type='primary',use_container_width=True):
+         if hmac.compare_digest(str(_pw),_APP_PASSWORD):
+@@ -4479,8 +4479,6 @@
      if persistence_enabled() and not st.session_state.get('_persistent_loaded'): load_persistent_state(fast=True)
      rows=_v31_rows(); inputs=st.session_state.get('portfolio_input',[]) or []
      st.markdown('<div class="sy-page-title">Visão Geral</div><div class="sy-page-sub">A carteira primeiro. O detalhe só aparece quando precisas.</div>',unsafe_allow_html=True)
@@ -9,7 +27,7 @@
      if not rows:
          read_failed=persistence_enabled() and st.session_state.get('_persistence_read_ok') is False
          st.markdown(f'''<div class="sy-hero"><div class="sy-eyebrow">EM CARTEIRA</div><div class="sy-value">{len(inputs) if inputs else '—'} posições</div><div class="sy-today na">{'Armazenamento indisponível' if read_failed else 'Ainda sem snapshot de mercado'}</div></div>''',unsafe_allow_html=True)
-@@ -4510,552 +4508,10 @@
+@@ -4512,552 +4510,10 @@
      st.caption('Os preços mostrados são os do último snapshot guardado; a app não os apresenta como streaming em tempo real.')
  
  
@@ -562,7 +580,7 @@
      if not rows:
          read_failed=persistence_enabled() and st.session_state.get('_persistence_read_ok') is False
          st.markdown(f'''<div class="sy-hero"><div class="sy-eyebrow">CARTEIRA</div><div class="sy-value">{len(inputs) if inputs else '—'} posições</div><div class="sy-today na">{'Armazenamento indisponível' if read_failed else 'Ainda sem snapshot de mercado'}</div></div>''',unsafe_allow_html=True)
-@@ -5107,7 +4563,6 @@
+@@ -5109,7 +4565,6 @@
          _v32_safe_today_fallback()
  
  def _v31_render_positions(rows):
@@ -570,7 +588,7 @@
      good=[r for r in rows if isinstance(r,dict) and not r.get('Erro')]
      if not good: st.markdown('<div class="sy-empty">Ainda não existem posições com dados de mercado no snapshot.</div>',unsafe_allow_html=True); return
      s=_v31_portfolio_stats(good)
-@@ -5124,7 +4579,7 @@
+@@ -5126,7 +4581,7 @@
      if note:
          st.caption(note)
  
@@ -579,7 +597,7 @@
  PAGE = TOP_PAGE
  if TOP_PAGE == 'Carteira':
      _carteira_view = st.radio('Carteira', ['Posições', 'Risco e alertas'], horizontal=True, label_visibility='collapsed', key='carteira_view_v31')
-@@ -5137,9 +4592,6 @@
+@@ -5139,9 +4594,6 @@
  
  if PAGE == 'Hoje':
      _v31_render_today()
