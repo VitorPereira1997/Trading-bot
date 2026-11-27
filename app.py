@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title='Gestor v33.5 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
+st.set_page_config(page_title='Gestor v33.6 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
 
 # -----------------------------------------------------------------------------
 # Autenticação multiutilizador
@@ -73,7 +73,7 @@ except Exception:
 
 if _USERS and not st.session_state.get('_app_authenticated',False):
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.5 · Finanças e INVEST')
+    st.caption('Gestor v33.6 · Finanças e INVEST')
     st.caption('Entra com o teu utilizador. Cada conta tem carteira, histórico e dados próprios.')
     _login_user=st.text_input('Utilizador').strip().lower()
     _login_pw=st.text_input('Palavra-passe',type='password')
@@ -92,7 +92,7 @@ if _USERS and not st.session_state.get('_app_authenticated',False):
 elif (not _USERS) and _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
     # Compatibilidade com a configuração antiga de uma única palavra-passe.
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.5 · Finanças e INVEST')
+    st.caption('Gestor v33.6 · Finanças e INVEST')
     _pw=st.text_input('Palavra-passe da aplicação',type='password')
     if st.button('Entrar',type='primary',use_container_width=True):
         if hmac.compare_digest(str(_pw),_APP_PASSWORD):
@@ -4586,9 +4586,24 @@ def _holding_calendar(symbol):
 
 
 @st.dialog('Análise da posição')
-def _holding_detail(position):
+def _holding_detail(position, saved=None):
     ticker = position['Ticker XTB']
-    st.subheader(views.badge(str(ticker))+' '+str(ticker))
+    st.subheader(views.badge(str(ticker))+' '+views.ui_text(ticker))
+    saved = saved or {}
+    name = views.company(str(ticker), saved)
+    if name:
+        st.text(name)
+    st.caption('Avaliação guardada · '+str(saved.get('Data') or 'Sem data'))
+    m1, m2 = st.columns(2)
+    m1.metric('Variação diária',views.signed(saved.get('Variação dia %')))
+    m2.metric('Desde o preço médio',views.signed(saved.get('P/L %')))
+    def display_num(value, suffix=''):
+        val = views.number(value)
+        return 'N/D' if val is None else f'{val:,.4f}'.rstrip('0').rstrip('.').replace(',',' ').replace('.',',')+suffix
+    st.text('Quantidade: '+display_num(position.get('Quantidade'))+' · Último preço: '+display_num(saved.get('Preço atual'),' '+str(saved.get('Moeda') or '')))
+    st.text('Valor avaliado: '+display_num(saved.get('Valor atual EUR'),' €')+' · Por realizar: '+views.signed(saved.get('P/L EUR aprox.'),' €'))
+    if not st.button('Consultar gráfico e análise',key='holding_fetch_market'):
+        return
     try:
         analysis = analyze_asset(ticker, detailed=False, instrument_type=position.get('Tipo instrumento'),
                                  source_override=position.get('Ticker técnico'))
@@ -5280,13 +5295,30 @@ with st.popover('☰', help='Menu de navegação', key='menu_'+section):
              format_func=lambda area: icons[area]+' '+area, on_change=choose_area)
 st.caption(section)
 st.markdown('''<style>
-[class*="st-key-card_up_"] button{background:#daf1df;color:#16472e}
-[class*="st-key-card_down_"] button{background:#f8e2de;color:#70332a}
-[class*="st-key-card_flat_"] button{background:#e8edeb;color:#34433e}
-[class*="st-key-card_"] button{min-height:52px;text-align:left}
-[data-testid="stVerticalBlock"][class*="st-key-grid_"]{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem}
+/* Escopo dos cartões: regras do tema para botões secundários não podem sobrepor o estado. */
+.stApp [class*="st-key-asset_"] button[kind="secondary"]{
+  background:var(--asset-bg)!important;color:var(--asset-text)!important;
+  border:1px solid var(--asset-edge)!important;border-radius:14px!important;
+  justify-content:flex-start;text-align:left;padding:.72rem .78rem;min-height:103px;height:100%;
+  transition:transform 130ms ease,box-shadow 130ms ease;
+}
+.stApp [class*="st-key-asset_up_"]{--asset-bg:#dff5e7;--asset-text:#183b29;--asset-edge:#9ac8ad;--asset-change:#175734}
+.stApp [class*="st-key-asset_down_"]{--asset-bg:#fae4e5;--asset-text:#501f26;--asset-edge:#dba5ab;--asset-change:#8a2635}
+.stApp [class*="st-key-asset_flat_"]{--asset-bg:#e1e8ef;--asset-text:#263749;--asset-edge:#aebbc8;--asset-change:#394e62}
+.stApp [class*="st-key-asset_"] button[kind="secondary"] p{font-size:.77rem;line-height:1.22;margin:0;overflow-wrap:anywhere}
+.stApp [class*="st-key-asset_"] button[kind="secondary"] p>strong{font-size:.93rem}
+.stApp [class*="st-key-asset_"] button[kind="secondary"] img{width:26px;height:26px;max-height:none;vertical-align:middle;margin-right:.25rem;border-radius:5px}
+.stApp [class*="st-key-asset_"] button[kind="secondary"] em{font-style:normal}
+.stApp [class*="st-key-asset_"] button[kind="secondary"] em strong,
+.stApp [class*="st-key-asset_"] button[kind="secondary"] strong em{font-size:1.35rem;line-height:1.45;color:var(--asset-change)!important;font-variant-numeric:tabular-nums}
+.stApp [class*="st-key-asset_"] button[kind="secondary"]:hover{transform:translateY(-1px);box-shadow:0 3px 9px #0004}
+.stApp [class*="st-key-asset_"] button[kind="secondary"]:focus-visible{outline:3px solid #57aefc;outline-offset:2px}
+[data-testid="stVerticalBlock"][class*="st-key-grid_"]{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.55rem}
+[data-testid="stVerticalBlock"][class*="st-key-grid_"]>div{min-width:0;height:100%}
+[class*="st-key-list_"] [class*="st-key-asset_"] button[kind="secondary"]{min-height:76px}
+@media(max-width:1040px){[data-testid="stVerticalBlock"][class*="st-key-grid_"]{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:700px){[data-testid="stVerticalBlock"][class*="st-key-grid_"]{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(prefers-reduced-motion:reduce){[class*="st-key-card_"] button{transition:none}}
+@media(prefers-reduced-motion:reduce){.stApp [class*="st-key-asset_"] button[kind="secondary"]{transition:none;transform:none}}
 </style>''',unsafe_allow_html=True)
 PAGE = section
 view_index = None
@@ -5352,8 +5384,10 @@ if PAGE == 'Início':
                                  ('Acompanhamento', [({'Ticker XTB':t}, by_ticker.get(str(t).upper(),{}))
                                   for t in st.session_state.get('watchlist',[]) if isinstance(t,str)], 'watch')]:
             st.subheader(title)
-            many = len(data)>4 and st.toggle('Ver todas',key='all_'+slug)
+            many = len(data)>4 and st.toggle(f'Ver todas ({len(data)})',key='all_'+slug)
             views.cards(data if many else data[:4],_holding_detail,slug)
+            if len(data)>4 and not many:
+                st.caption(f'A mostrar 4 de {len(data)}. Carrega num cartão para ver o detalhe.')
             if not data:
                 st.caption('Sem títulos carregados.')
 elif PAGE == 'Alertas e partilha':
@@ -5369,12 +5403,16 @@ elif PAGE == 'Vista de carteira':
 elif PAGE == 'Posições':
     search = st.text_input('Pesquisar por ticker ou nome').casefold().strip()
     kind = st.selectbox('Tipo', ['Todos','Ação','ETF','ETN','CFD'])
-    compact = st.radio('Apresentação',['Grelha','Lista'],horizontal=True)=='Lista'
+    layout = st.radio('Apresentação',['Grelha','Lista','Tabela'],horizontal=True)
+    compact = layout=='Lista'
     pairs = [(p,r) for p,r in views.matched(positions,rows)
-             if search in (str(p.get('Ticker XTB'))+' '+str(r.get('Empresa') or '')).casefold()
+             if search in (str(p.get('Ticker XTB'))+' '+views.company(str(p.get('Ticker XTB')),r)).casefold()
              and (kind=='Todos' or kind==(r.get('Tipo instrumento') or p.get('Tipo instrumento')))]
-    views.cards(pairs,_holding_detail,'open',compact)
-    if pairs:
+    if pairs and layout != 'Tabela':
+        views.cards(pairs,_holding_detail,'open',compact)
+    if positions and not pairs:
+        st.info('Nenhuma posição corresponde aos filtros.')
+    if pairs and layout=='Tabela':
         st.dataframe([{'Título':p.get('Ticker XTB'),'Quantidade':p.get('Quantidade'),'Preço':r.get('Preço atual'),
                        'Moeda':r.get('Moeda'),'Data':r.get('Data'),'Valor EUR':r.get('Valor atual EUR'),
                        'Dia %':r.get('Variação dia %'),'Desde o preço médio %':r.get('P/L %'),
