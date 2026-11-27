@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title='Gestor v33.6.1 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
+st.set_page_config(page_title='Gestor v33.7 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
 
 # -----------------------------------------------------------------------------
 # Autenticação multiutilizador
@@ -55,9 +55,9 @@ def _clear_user_session(clear_auth=False):
         'comparison_df','comparison_time','v14_scan_rows','v20_scan_time','v14_analysis','v14_analysis_detail',
         'report_parsed','report_result','report_file_name','report_library','_report_last_upload_hash','v29_analysis_insiders',
         'portfolio_snapshot','portfolio_snapshot_updated_at','house_goal',
-        'cash_history_preview','cash_history_upload',
+        'cash_history_preview','cash_history_upload','cash_history_source','cash_history_eur','cash_history_year','cash_history_month',
     }
-    prefixes=('finance_', 'opp_','alert_','risk_','decision_stats_')
+    prefixes=('cash_history_eur_', 'finance_', 'opp_','alert_','risk_','decision_stats_')
     for key in list(st.session_state.keys()):
         if key in exact or any(str(key).startswith(pref) for pref in prefixes):
             st.session_state.pop(key,None)
@@ -73,7 +73,7 @@ except Exception:
 
 if _USERS and not st.session_state.get('_app_authenticated',False):
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.6.1 · Finanças e INVEST')
+    st.caption('Gestor v33.7 · Finanças e INVEST')
     st.caption('Entra com o teu utilizador. Cada conta tem carteira, histórico e dados próprios.')
     _login_user=st.text_input('Utilizador').strip().lower()
     _login_pw=st.text_input('Palavra-passe',type='password')
@@ -92,7 +92,7 @@ if _USERS and not st.session_state.get('_app_authenticated',False):
 elif (not _USERS) and _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
     # Compatibilidade com a configuração antiga de uma única palavra-passe.
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.6.1 · Finanças e INVEST')
+    st.caption('Gestor v33.7 · Finanças e INVEST')
     _pw=st.text_input('Palavra-passe da aplicação',type='password')
     if st.button('Entrar',type='primary',use_container_width=True):
         if hmac.compare_digest(str(_pw),_APP_PASSWORD):
@@ -5283,7 +5283,7 @@ def _open_area(area, detail=None):
 
 
 # Nome novo evita reutilizar o módulo anterior nas sessões Streamlit existentes.
-import gestor_views_3361 as views
+import gestor_views_337 as views
 
 areas = ['Início','Carteira','Património','Dividendos','Distribuição','Desempenho','Pontuação','Mais']
 section = st.session_state.get('ui_navigation', 'Início')
