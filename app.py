@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title='Gestor v33.6 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
+st.set_page_config(page_title='Gestor v33.6.1 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
 
 # -----------------------------------------------------------------------------
 # Autenticação multiutilizador
@@ -73,7 +73,7 @@ except Exception:
 
 if _USERS and not st.session_state.get('_app_authenticated',False):
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.6 · Finanças e INVEST')
+    st.caption('Gestor v33.6.1 · Finanças e INVEST')
     st.caption('Entra com o teu utilizador. Cada conta tem carteira, histórico e dados próprios.')
     _login_user=st.text_input('Utilizador').strip().lower()
     _login_pw=st.text_input('Palavra-passe',type='password')
@@ -92,7 +92,7 @@ if _USERS and not st.session_state.get('_app_authenticated',False):
 elif (not _USERS) and _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
     # Compatibilidade com a configuração antiga de uma única palavra-passe.
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.6 · Finanças e INVEST')
+    st.caption('Gestor v33.6.1 · Finanças e INVEST')
     _pw=st.text_input('Palavra-passe da aplicação',type='password')
     if st.button('Entrar',type='primary',use_container_width=True):
         if hmac.compare_digest(str(_pw),_APP_PASSWORD):
@@ -5282,7 +5282,8 @@ def _open_area(area, detail=None):
         st.session_state.ui_more = detail
 
 
-import portfolio_views as views
+# Nome novo evita reutilizar o módulo anterior nas sessões Streamlit existentes.
+import gestor_views_3361 as views
 
 areas = ['Início','Carteira','Património','Dividendos','Distribuição','Desempenho','Pontuação','Mais']
 section = st.session_state.get('ui_navigation', 'Início')
