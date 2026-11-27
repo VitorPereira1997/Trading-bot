@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title='Gestor v33.1 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
+st.set_page_config(page_title='Gestor v33.5 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
 
 # -----------------------------------------------------------------------------
 # Autenticação multiutilizador
@@ -55,6 +55,7 @@ def _clear_user_session(clear_auth=False):
         'comparison_df','comparison_time','v14_scan_rows','v20_scan_time','v14_analysis','v14_analysis_detail',
         'report_parsed','report_result','report_file_name','report_library','_report_last_upload_hash','v29_analysis_insiders',
         'portfolio_snapshot','portfolio_snapshot_updated_at','house_goal',
+        'cash_history_preview','cash_history_upload',
     }
     prefixes=('finance_', 'opp_','alert_','risk_','decision_stats_')
     for key in list(st.session_state.keys()):
@@ -72,7 +73,7 @@ except Exception:
 
 if _USERS and not st.session_state.get('_app_authenticated',False):
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.4 · Finanças e INVEST')
+    st.caption('Gestor v33.5 · Finanças e INVEST')
     st.caption('Entra com o teu utilizador. Cada conta tem carteira, histórico e dados próprios.')
     _login_user=st.text_input('Utilizador').strip().lower()
     _login_pw=st.text_input('Palavra-passe',type='password')
@@ -91,7 +92,7 @@ if _USERS and not st.session_state.get('_app_authenticated',False):
 elif (not _USERS) and _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
     # Compatibilidade com a configuração antiga de uma única palavra-passe.
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.4 · Finanças e INVEST')
+    st.caption('Gestor v33.5 · Finanças e INVEST')
     _pw=st.text_input('Palavra-passe da aplicação',type='password')
     if st.button('Entrar',type='primary',use_container_width=True):
         if hmac.compare_digest(str(_pw),_APP_PASSWORD):
@@ -4587,13 +4588,19 @@ def _holding_calendar(symbol):
 @st.dialog('Análise da posição')
 def _holding_detail(position):
     ticker = position['Ticker XTB']
-    st.subheader(ticker)
+    st.subheader(views.badge(str(ticker))+' '+str(ticker))
     try:
         analysis = analyze_asset(ticker, detailed=False, instrument_type=position.get('Tipo instrumento'),
                                  source_override=position.get('Ticker técnico'))
         action, score = _long_action(analysis, holding=True)
         st.write(action, ' · ', _fmt_num(score, 0, '/100'))
         st.caption(f"Yahoo Finance · {analysis['source_ticker']} · fecho ajustado {analysis['row']['Close']:g} {analysis['currency']} em {analysis['row'].name.date()}")
+        history=analysis.get('raw')
+        if history is not None and 'Close' in history and not history.empty:
+            closes=history['Close'].dropna().tail(60)
+            if len(closes)>=2 and closes.iloc[-2]>0:
+                st.write('Variação na última sessão · '+views.signed((closes.iloc[-1]/closes.iloc[-2]-1)*100))
+                st.line_chart(closes,y_label='Fecho ajustado',height=180)
         for item in _long_evidence(analysis):
             st.write(item)
     except Exception:
@@ -4613,6 +4620,83 @@ def _position_summary(positions, rows):
     dates = {str(r.get('Data') or '') for r in rows}
     daily = total('Variação dia EUR') if len(dates) == 1 and '' not in dates else None
     return total('Valor atual EUR'), total('P/L EUR aprox.'), daily
+
+
+def _saved_valuation_gaps(positions, rows):
+    remaining = list(rows)
+    gaps = []
+    for p in positions:
+        ticker = str(p.get('Ticker XTB') or '').strip()
+        qty = _safe_float(p.get('Quantidade'))
+        candidates = [r for r in remaining if str(r.get('Ticker XTB') or '').strip().upper() == ticker.upper()]
+        match = next((r for r in candidates if _safe_float(r.get('Quantidade')) == qty), None)
+        if not ticker or qty is None or qty <= 0:
+            reason = 'Ticker ou quantidade em falta'
+        elif match is None:
+            if any(r.get('Erro') for r in candidates):
+                reason = 'Erro na última análise'
+            elif candidates:
+                reason = 'Quantidade diferente ou ausente na avaliação'
+            else:
+                reason = 'Sem linha correspondente na avaliação guardada'
+        else:
+            remaining.remove(match)
+            if match.get('Erro'):
+                reason = 'Erro na última análise'
+            elif str(match.get('Ticker XTB')) != str(p.get('Ticker XTB')):
+                reason = 'Identificador guardado com grafia diferente'
+            elif _safe_float(match.get('Valor atual EUR')) is not None:
+                continue
+            elif match.get('Tipo instrumento') == 'CFD':
+                reason = 'CFD sem valor investido comparável'
+            elif _safe_float(match.get('Preço atual')) is None:
+                reason = 'Falta a cotação guardada'
+            elif match.get('Moeda') in (None, '', 'N/D'):
+                reason = 'Falta a moeda da cotação'
+            else:
+                reason = 'Falta o valor em EUR na avaliação guardada'
+        gaps.append({'Ticker XTB': ticker or 'N/D', 'Estado': reason})
+    for r in remaining:
+        if not any(g['Ticker XTB'] == r.get('Ticker XTB') for g in gaps):
+            gaps.append({'Ticker XTB': r.get('Ticker XTB'), 'Estado': 'Linha adicional na avaliação guardada'})
+    return gaps
+
+
+def _preview_valuation(p):
+    ticker = str(p.get('Ticker XTB') or '').strip()
+    qty = _safe_float(p.get('Quantidade'))
+    row = {'Ticker XTB': ticker, 'Quantidade': qty, 'Valor atual EUR': None}
+    if not ticker or qty is None or qty <= 0:
+        return dict(row, Estado='Ticker ou quantidade inválidos')
+    if _normalize_instrument_type(p.get('Tipo instrumento') or p.get('Tipo')) == 'CFD':
+        return dict(row, Estado='CFD sem valor investido comparável')
+    symbol = str(p.get('Ticker técnico') or '').strip()
+    if symbol.lower() in ('', 'none', 'nan'):
+        symbol = resolve_instrument(ticker)['source_ticker']
+    row['Símbolo da cotação'] = symbol
+    try:
+        closes = price_data(symbol, '5d', '1d')['Close']
+        close = _safe_float(closes.iloc[-1])
+        row['Data'] = closes.index[-1].date().isoformat()
+    except Exception:
+        close = None
+    if close is None or close <= 0:
+        return dict(row, Estado='Cotação indisponível')
+    row['Fecho ajustado'] = close
+    try:
+        currency = asset_info(symbol).get('currency')
+    except Exception:
+        currency = None
+    if not currency:
+        return dict(row, Estado='Moeda da cotação indisponível')
+    row['Moeda'] = currency
+    if currency not in ('EUR', 'USD', 'GBP', 'CHF'):
+        return dict(row, Estado='Conversão da unidade de cotação não suportada')
+    rate = _safe_float(fx_per_eur(currency))
+    if rate is None or rate <= 0:
+        return dict(row, Estado='Câmbio indisponível')
+    value = _safe_float(qty * close / rate)
+    return dict(row, **{'Valor atual EUR': value, 'Estado': 'Avaliada' if value is not None else 'Valor inválido'})
 
 
 def _position_links(positions):
@@ -5183,17 +5267,43 @@ def _open_area(area, detail=None):
         st.session_state.ui_more = detail
 
 
-areas = ['Início','Património','Carteira','Mais']
-section = st.radio('Navegação', areas, key='ui_navigation', horizontal=True, label_visibility='collapsed')
-PAGE = section
-if section == 'Mais':
-    PAGE = st.selectbox('Ferramentas', ['Oportunidades','Fecho mensal','Objetivo','Comparar','Relatório','Analisar','Briefing completo'],key='ui_more')
-elif section == 'Carteira':
-    PAGE = st.radio('Carteira', ['Posições','Gestão','Risco'],horizontal=True,label_visibility='collapsed')
-    if PAGE == 'Gestão':
-        PAGE = 'Carteira'
+import portfolio_views as views
 
-if PAGE in ('Início', 'Posições'):
+areas = ['Início','Carteira','Património','Dividendos','Distribuição','Desempenho','Pontuação','Mais']
+section = st.session_state.get('ui_navigation', 'Início')
+with st.popover('☰', help='Menu de navegação', key='menu_'+section):
+    icons = dict(zip(areas, ['⌂','▤','◇','◷','◉','↗','◈','＋']))
+    menu_key = 'destino_' + section
+    def choose_area():
+        _open_area(st.session_state[menu_key])
+    st.radio('Áreas', areas, index=areas.index(section), key=menu_key,
+             format_func=lambda area: icons[area]+' '+area, on_change=choose_area)
+st.caption(section)
+st.markdown('''<style>
+[class*="st-key-card_up_"] button{background:#daf1df;color:#16472e}
+[class*="st-key-card_down_"] button{background:#f8e2de;color:#70332a}
+[class*="st-key-card_flat_"] button{background:#e8edeb;color:#34433e}
+[class*="st-key-card_"] button{min-height:52px;text-align:left}
+[data-testid="stVerticalBlock"][class*="st-key-grid_"]{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem}
+@media(max-width:700px){[data-testid="stVerticalBlock"][class*="st-key-grid_"]{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(prefers-reduced-motion:reduce){[class*="st-key-card_"] button{transition:none}}
+</style>''',unsafe_allow_html=True)
+PAGE = section
+view_index = None
+if section == 'Mais':
+    PAGE = st.selectbox('Ferramentas', ['Oportunidades','Fecho mensal','Objetivo','Comparar','Relatório','Analisar','Briefing completo','Alertas e partilha'],key='ui_more')
+elif section in views.VIEWS:
+    options = list(views.VIEWS[section])
+    if section == 'Carteira':
+        options += ['Gestão','Risco']
+    choice = st.selectbox('Vista', options, key='view_'+section)
+    if choice in ('Gestão','Risco'):
+        PAGE = 'Carteira' if choice == 'Gestão' else choice
+    else:
+        view_index = int(choice[:2])
+        PAGE = 'Posições' if view_index == 10 else 'Vista de carteira'
+
+if PAGE in ('Início', 'Posições', 'Vista de carteira'):
     enabled = persistence_enabled()
     if enabled and not st.session_state.get('_persistent_loaded') and st.session_state.get('_persistence_read_ok') is not False:
         load_persistent_state(fast=True)
@@ -5202,7 +5312,7 @@ if PAGE in ('Início', 'Posições'):
     positions = [] if failed else st.session_state.get('portfolio_input', [])
     rows = _v31_rows() if positions else []
     invested, _, daily = _position_summary(positions, rows)
-    st.title('Visão geral' if PAGE == 'Início' else 'Carteira')
+    st.title('Visão geral' if PAGE == 'Início' else choice.split(' · ',1)[-1])
     if failed:
         st.warning('Não foi possível ler a carteira guardada. O saldo e as posições estão por confirmar.')
         st.button('Tentar ler novamente', key='portfolio_retry_read', on_click=load_persistent_state,
@@ -5211,7 +5321,7 @@ if PAGE in ('Início', 'Posições'):
         st.info('Armazenamento permanente não configurado. Apenas os dados desta sessão estão disponíveis.')
     elif not positions:
         st.info('Leitura concluída. Não há posições guardadas nesta conta.')
-    if positions and invested is None:
+    if PAGE != 'Vista de carteira' and positions and invested is None:
         st.info('Posições carregadas. Falta uma avaliação completa correspondente às quantidades guardadas.')
 
 if PAGE == 'Início':
@@ -5230,21 +5340,71 @@ if PAGE == 'Início':
         ref = 'Saldos de '+next(iter(dates)) if len(dates)==1 else 'Saldos de datas diferentes' if dates else 'Sem saldos confirmados'
     daily_text = 'Variação da sessão indisponível' if daily is None else f'{_v31_money(daily)} na sessão'
     st.markdown(f'<div class="home-summary"><section><h2>Património líquido</h2><strong>{_v31_money(net)}</strong><small>Ativos menos dívidas</small><small>{ref}</small></section><section><h2>Carteira investida</h2><strong>{_v31_money(invested)}</strong><small>{daily_text}</small><small>{_v32_updated_label()}</small></section></div>',unsafe_allow_html=True)
+    st.caption('Estado do mercado por confirmar · '+_v32_updated_label())
     st.subheader('A acompanhar')
     left,right = st.columns(2)
     left.button('Oportunidades de hoje →',on_click=_open_area,args=('Mais','Oportunidades'),use_container_width=True)
     right.button('Rever fecho do mês →',on_click=_open_area,args=('Mais','Fecho mensal'),use_container_width=True)
-    st.subheader('As minhas posições')
-    if positions:
-        _position_links(positions)
+    if not failed:
+        pairs = views.matched(positions, rows)
+        by_ticker = {views.key(p)[0]: r for p,r in pairs}
+        for title, data, slug in [('As minhas posições', pairs, 'holding'),
+                                 ('Acompanhamento', [({'Ticker XTB':t}, by_ticker.get(str(t).upper(),{}))
+                                  for t in st.session_state.get('watchlist',[]) if isinstance(t,str)], 'watch')]:
+            st.subheader(title)
+            many = len(data)>4 and st.toggle('Ver todas',key='all_'+slug)
+            views.cards(data if many else data[:4],_holding_detail,slug)
+            if not data:
+                st.caption('Sem títulos carregados.')
+elif PAGE == 'Alertas e partilha':
+    st.title('Pré-visualização de alertas e partilha')
+    st.caption('Simulação privada nesta sessão.')
+    ticker=st.text_input('Título a rever',max_chars=30)
+    threshold=st.number_input('Limiar de revisão em EUR', min_value=0.0)
+    if st.button('Pré-visualizar texto') and ticker and threshold>0:
+        st.code(f'Rever {ticker} se o preço atingir {threshold:.2f} EUR.')
+elif PAGE == 'Vista de carteira':
+    if not failed:
+        views.render(view_index, views.matched(positions,rows), _holding_detail, _holding_calendar, resolve_instrument, price_data)
 elif PAGE == 'Posições':
-    _position_links(positions)
-    if rows:
-        columns = ['Ticker XTB', 'Data', 'Quantidade', 'Preço atual', 'Moeda', 'Valor atual EUR', 'P/L EUR aprox.', 'P/L %', 'Erro']
-        st.write('Última avaliação guardada por posição')
-        st.dataframe(pd.DataFrame(rows).reindex(columns=[k for k in columns if any(k in r for r in rows)]), hide_index=True)
-    if positions:
-        _portfolio_overview(positions, rows)
+    search = st.text_input('Pesquisar por ticker ou nome').casefold().strip()
+    kind = st.selectbox('Tipo', ['Todos','Ação','ETF','ETN','CFD'])
+    compact = st.radio('Apresentação',['Grelha','Lista'],horizontal=True)=='Lista'
+    pairs = [(p,r) for p,r in views.matched(positions,rows)
+             if search in (str(p.get('Ticker XTB'))+' '+str(r.get('Empresa') or '')).casefold()
+             and (kind=='Todos' or kind==(r.get('Tipo instrumento') or p.get('Tipo instrumento')))]
+    views.cards(pairs,_holding_detail,'open',compact)
+    if pairs:
+        st.dataframe([{'Título':p.get('Ticker XTB'),'Quantidade':p.get('Quantidade'),'Preço':r.get('Preço atual'),
+                       'Moeda':r.get('Moeda'),'Data':r.get('Data'),'Valor EUR':r.get('Valor atual EUR'),
+                       'Dia %':r.get('Variação dia %'),'Desde o preço médio %':r.get('P/L %'),
+                       'Por realizar EUR':r.get('P/L EUR aprox.')} for p,r in pairs],hide_index=True)
+    if positions and st.button('Consultar próximos resultados e dividendos',key='open_events'):
+        for t in dict.fromkeys(str(p.get('Ticker XTB')) for p in positions):
+            try:
+                p=next(p for p in positions if str(p.get('Ticker XTB'))==t)
+                events=_holding_calendar(p.get('Ticker técnico') or resolve_instrument(t)['source_ticker'])
+            except Exception:
+                events=[]
+            st.write(t+' · '+(' / '.join(events) or 'Sem datas verificáveis')+' · Yahoo Finance')
+    if positions and invested is None:
+        st.dataframe(pd.DataFrame(_saved_valuation_gaps(positions, rows)), hide_index=True)
+    if positions and st.button('Pré-visualizar avaliação sem guardar', key='valuation_preview'):
+        preview = [_preview_valuation(p) for p in positions]
+        values = [r['Valor atual EUR'] for r in preview]
+        covered = sum(v is not None for v in values)
+        st.write(f'Pré-visualização · {covered}/{len(values)} posições avaliadas')
+        st.caption('Yahoo Finance · último fecho ajustado disponível por título, convertido com o câmbio disponível. O valor das posições exclui caixa e não mede rentabilidade.')
+        st.dataframe(pd.DataFrame(preview), hide_index=True)
+        st.metric('Valor das posições em pré-visualização', _v31_money(sum(values)) if covered == len(values) else 'N/D')
+
+    if positions and st.toggle('Ver histórico guardado e detalhe do desempenho',key='open_history'):
+        if rows:
+            columns = ['Ticker XTB', 'Data', 'Quantidade', 'Preço atual', 'Moeda', 'Valor atual EUR', 'P/L EUR aprox.', 'P/L %', 'Erro']
+            st.write('Última avaliação guardada por posição')
+            st.dataframe(pd.DataFrame(rows).reindex(columns=[k for k in columns if any(k in r for r in rows)]), hide_index=True)
+        if positions:
+            _portfolio_overview(positions, rows)
 elif PAGE == 'Briefing completo':
     _v31_render_today()
 elif PAGE == 'Património' or PAGE == 'Fecho mensal':
