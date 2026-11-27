@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title='Gestor v33.7 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
+st.set_page_config(page_title='Gestor v33.9 · Casa 60k', page_icon='🏠', layout='wide', initial_sidebar_state='collapsed')
 
 # -----------------------------------------------------------------------------
 # Autenticação multiutilizador
@@ -57,7 +57,7 @@ def _clear_user_session(clear_auth=False):
         'portfolio_snapshot','portfolio_snapshot_updated_at','house_goal',
         'cash_history_preview','cash_history_upload','cash_history_source','cash_history_eur','cash_history_year','cash_history_month',
     }
-    prefixes=('cash_history_eur_', 'finance_', 'opp_','alert_','risk_','decision_stats_')
+    prefixes=('positions_csv_', 'cash_history_', 'finance_', 'opp_','alert_','risk_','decision_stats_')
     for key in list(st.session_state.keys()):
         if key in exact or any(str(key).startswith(pref) for pref in prefixes):
             st.session_state.pop(key,None)
@@ -73,7 +73,7 @@ except Exception:
 
 if _USERS and not st.session_state.get('_app_authenticated',False):
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.7 · Finanças e INVEST')
+    st.caption('Gestor v33.9 · Finanças e INVEST')
     st.caption('Entra com o teu utilizador. Cada conta tem carteira, histórico e dados próprios.')
     _login_user=st.text_input('Utilizador').strip().lower()
     _login_pw=st.text_input('Palavra-passe',type='password')
@@ -92,7 +92,7 @@ if _USERS and not st.session_state.get('_app_authenticated',False):
 elif (not _USERS) and _APP_PASSWORD and not st.session_state.get('_app_authenticated',False):
     # Compatibilidade com a configuração antiga de uma única palavra-passe.
     st.title('🔒 Carteira Inteligente')
-    st.caption('Gestor v33.7 · Finanças e INVEST')
+    st.caption('Gestor v33.9 · Finanças e INVEST')
     _pw=st.text_input('Palavra-passe da aplicação',type='password')
     if st.button('Entrar',type='primary',use_container_width=True):
         if hmac.compare_digest(str(_pw),_APP_PASSWORD):
@@ -436,6 +436,117 @@ def save_persistent_state(show_error=False):
         if show_error:
             st.error(f'Não foi possível guardar permanentemente: {e}')
         return False
+
+def _position_import_ready():
+    return bool(_USERS and st.session_state.get('_app_authenticated') and st.session_state.get('_owner_id')
+                and persistence_enabled() and st.session_state.get('_persistence_read_ok') is True)
+
+
+def _store_reviewed_positions(baseline, planned):
+    """Commit only the reviewed portfolio field; preserve remote cash, FX and snapshot."""
+    if not _position_import_ready():
+        raise ValueError('É necessária a tua sessão individual e uma leitura do armazenamento privado.')
+    _, _, owner = persistence_config()
+    query = urllib.parse.urlencode({'owner_id':'eq.'+owner,'select':'state,updated_at'})
+    try:
+        rows = _supabase_request('GET','/rest/v1/trading_bot_state?'+query,retries=1)
+    except Exception as exc:
+        raise ValueError('Não foi possível ler os dados guardados. A carteira não foi alterada.') from exc
+    if not isinstance(rows,list) or len(rows)>1:
+        raise ValueError('Não foi possível confirmar a carteira guardada. A importação foi bloqueada.')
+    previous = rows[0].get('updated_at') if rows and isinstance(rows[0],dict) else None
+    before = rows[0].get('state') if rows and isinstance(rows[0],dict) else {}
+    if not isinstance(before,dict) or (rows and not isinstance(previous,str)):
+        raise ValueError('Não foi possível confirmar a versão guardada. A importação foi bloqueada.')
+    if before.get('portfolio_input', []) != baseline or _json_safe(st.session_state.get('portfolio_input', [])) != baseline:
+        raise ValueError('A carteira mudou desde a leitura. Recarrega a carteira antes de confirmar a importação.')
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {'state':{**before,'portfolio_input':planned},'updated_at':now}
+    try:
+        if rows:
+            guard = urllib.parse.urlencode({'owner_id':'eq.'+owner, 'updated_at':'eq.'+previous})
+            saved = _supabase_request('PATCH','/rest/v1/trading_bot_state?'+guard,payload,
+                                      {'Prefer':'return=representation'},retries=1)
+            if saved == []:
+                raise ValueError('A carteira mudou noutra sessão. Recarrega antes de confirmar a importação.')
+        else:
+            saved = _supabase_request('POST','/rest/v1/trading_bot_state',{'owner_id':owner,**payload},
+                                      {'Prefer':'return=representation'},retries=1)
+        if (not isinstance(saved,list) or len(saved)!=1 or not isinstance(saved[0],dict)
+            or not isinstance(saved[0].get('updated_at'),str)
+            or saved[0].get('state')!=payload['state']):
+            raise RuntimeError('Resposta inesperada à gravação.')
+        now = saved[0]['updated_at']
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError('Não consegui confirmar a gravação. Recarrega a carteira para verificar antes de repetir.') from exc
+    local_stamp = st.session_state.get('persistence_last_save')
+    st.session_state.portfolio_input = planned
+    if local_stamp == previous:
+        st.session_state['persistence_last_save'] = now
+    st.session_state['persistence_status'] = 'Ligado'
+
+
+def _xtb_store_ready():
+    return bool(_USERS and st.session_state.get('_app_authenticated') and st.session_state.get('_owner_id')
+                and persistence_enabled() and st.session_state.get('_persistence_read_ok') is True)
+
+
+def _xtb_saved_for_view():
+    from xtb_history_339 import FIELD
+    return (st.session_state.get('opp_saved_fields') or {}).get(FIELD) if _xtb_store_ready() else None
+
+
+def _xtb_save_reviewed(account, movements):
+    from xtb_history_339 import FIELD, merge
+    if not _xtb_store_ready():
+        raise ValueError('O histórico permanente só está disponível na tua sessão individual.')
+    _, _, owner = persistence_config()
+    query = urllib.parse.urlencode({'owner_id':'eq.'+owner,'select':'state,updated_at'})
+    # Get fresh state and write with a version check. Only this history differs
+    # from the state fetched here; no unsaved session data is included.
+    try:
+        found = _supabase_request('GET','/rest/v1/trading_bot_state?'+query,retries=1) or []
+    except Exception as exc:
+        raise ValueError('Não foi possível ler os dados guardados. Nada foi guardado.') from exc
+    if not isinstance(found,list) or len(found)>1 or (found and not isinstance(found[0].get('state'),dict)):
+        raise ValueError('Não foi possível confirmar os dados guardados. Nada foi guardado.')
+    original = found[0]['state'] if found else {}
+    previous = found[0].get('updated_at') if found else None
+    if found and not isinstance(previous,str):
+        raise ValueError('Não foi possível confirmar a versão dos dados guardados. Nada foi guardado.')
+    merged, added, duplicates = merge(original.get(FIELD),account,movements)
+    latest = previous
+    if added:
+        now = datetime.now(timezone.utc).isoformat()
+        payload = {'state':{**original,FIELD:merged},'updated_at':now}
+        try:
+            if found:
+                match = urllib.parse.urlencode({'owner_id':'eq.'+owner,'updated_at':'eq.'+previous})
+                result = _supabase_request('PATCH','/rest/v1/trading_bot_state?'+match,
+                                           payload,{'Prefer':'return=representation'},retries=1)
+                if not result:
+                    raise ValueError('Os dados mudaram noutra sessão. Rever o extrato antes de tentar de novo.')
+            else:
+                result = _supabase_request('POST','/rest/v1/trading_bot_state',{'owner_id':owner,**payload},
+                                           {'Prefer':'return=representation'},retries=1)
+            if (not isinstance(result,list) or len(result)!=1 or not isinstance(result[0],dict)
+                or (result[0].get('state') or {}).get(FIELD) != merged):
+                raise ValueError('Não consegui confirmar a gravação. Verifica o histórico guardado antes de repetir.')
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError('Não consegui confirmar a gravação. Verifica o histórico guardado antes de repetir.') from exc
+        latest = now
+    original_session_timestamp = st.session_state.get('persistence_last_save')
+    st.session_state['opp_saved_fields'] = {**(st.session_state.get('opp_saved_fields') or {}), FIELD:merged}
+    # Do not adopt a newer general state revision if the current user's session
+    # had not seen it; subsequent ordinary writes must respect the old lease.
+    if original_session_timestamp == previous and latest:
+        st.session_state['persistence_last_save'] = latest
+    return added, duplicates
+
 
 def load_persistent_state(force=False, fast=False):
     if st.session_state.get('_persistent_loaded') and not force:
@@ -4248,6 +4359,33 @@ def _v32_attention_html(rows, limit=4):
         out.append(f'''<div class="sy-attn"><div class="sy-attn-icon">◎</div><div class="sy-attn-main"><div class="sy-attn-title">{ticker} <span class="sy-badge {color}">{bucket}</span></div><div class="sy-attn-text">{msg}</div></div></div>''')
     return ''.join(out) or '<div class="sy-attn-text">Sem alertas relevantes no último snapshot.</div>'
 
+def _finish_market_refresh(inputs, attempted):
+    latest = _position_summary(inputs, attempted)[0]
+    if latest is None:
+        retained, _, _, days = _position_valuation(inputs, _v31_rows())
+        st.warning(('A nova avaliação está incompleta. Mantive a última completa. '+_valuation_dates(days))
+                   if retained is not None else 'Não foi possível obter uma avaliação completa em EUR. A carteira guardada não foi alterada.')
+        gaps = _saved_valuation_gaps(inputs, attempted)
+        if gaps:
+            st.dataframe(pd.DataFrame(gaps), hide_index=True)
+        return False
+    keys = ('v14_portfolio_rows','portfolio_rows','portfolio_snapshot','portfolio_snapshot_updated_at')
+    prior = {key:st.session_state[key] for key in keys if key in st.session_state}
+    st.session_state['v14_portfolio_rows']=attempted
+    _v31_store_snapshot(attempted)
+    if not persistence_enabled():
+        st.info('Avaliação disponível nesta sessão. Armazenamento permanente não configurado.')
+        return True
+    if save_persistent_state(show_error=True):
+        return True
+    for key in keys:
+        if key in prior:
+            st.session_state[key]=prior[key]
+        else:
+            st.session_state.pop(key, None)
+    return False
+
+
 def _v32_refresh_portfolio():
     inputs=st.session_state.get('portfolio_input',[]) or []
     if not inputs: st.warning('Ainda não existem posições para atualizar.'); return
@@ -4258,7 +4396,9 @@ def _v32_refresh_portfolio():
             if qr: out.append(qr)
         except Exception as e: out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
         prog.progress(i/max(len(inputs),1),text=f'{i}/{len(inputs)}')
-    prog.empty(); st.session_state['v14_portfolio_rows']=out; _v31_store_snapshot(out); save_persistent_state(show_error=False); st.rerun()
+    prog.empty()
+    if _finish_market_refresh(inputs, out) and persistence_enabled():
+        st.rerun()
 
 def _v32_storage_controls():
     status=st.session_state.get('persistence_status','Apenas sessão')
@@ -4622,19 +4762,89 @@ def _holding_detail(position, saved=None):
         st.info('Análise indisponível para esta posição.')
 
 
-def _position_summary(positions, rows):
-    from collections import Counter
-    def identity(r):
-        return str(r.get('Ticker XTB', '')), _safe_float(r.get('Quantidade'))
-    complete = bool(positions) and Counter(map(identity, positions)) == Counter(map(identity, rows))
-    def total(field):
-        vals = [_safe_float(r.get(field)) for r in rows]
-        if complete and all(v is not None and math.isfinite(v) for v in vals):
-            return sum(vals)
+def _quote_day(value):
+    """A saved close date is not a live timestamp."""
+    raw = str(value or '').strip()
+    try:
+        day = date.fromisoformat(raw)
+    except ValueError:
         return None
-    dates = {str(r.get('Data') or '') for r in rows}
-    daily = total('Variação dia EUR') if len(dates) == 1 and '' not in dates else None
-    return total('Valor atual EUR'), total('P/L EUR aprox.'), daily
+    return day if raw == day.isoformat() and day <= datetime.now(timezone.utc).date() else None
+
+
+def _position_valuation(positions, rows):
+    """Keep proven valuation separate from daily movement and unrealised P/L."""
+    from collections import defaultdict
+    from decimal import Decimal, InvalidOperation
+
+    def identity(row):
+        symbol = str(row.get('Ticker XTB') or '').strip().upper()
+        try:
+            quantity = Decimal(str(row.get('Quantidade')))
+        except (InvalidOperation, ValueError):
+            return None
+        if not symbol or not quantity.is_finite() or quantity <= 0:
+            return None
+        return symbol, quantity
+
+    empty = (None, None, None, ())
+    if not positions or len(rows) != len(positions):
+        return empty
+    buckets = defaultdict(list)
+    for r in rows:
+        key = identity(r) if isinstance(r, dict) else None
+        if key is None or r.get('Erro'):
+            return empty
+        buckets[key].append(r)
+    checked, days, cost_matches = [], set(), True
+    for p in positions:
+        key = identity(p) if isinstance(p, dict) else None
+        candidates = buckets.get(key, [])
+        if not candidates:
+            return empty
+        kind = _normalize_instrument_type(p.get('Tipo instrumento') or p.get('Tipo'))
+        override = str(p.get('Ticker técnico') or '').strip().upper()
+        if override in ('NAN', 'NONE'):
+            override = ''
+        match = next((i for i,r in enumerate(candidates)
+                      if _normalize_instrument_type(r.get('Tipo instrumento') or r.get('Tipo')) != 'CFD'
+                      and kind != 'CFD'
+                      and kind in ('Auto', _normalize_instrument_type(r.get('Tipo instrumento') or r.get('Tipo')))
+                      and (not override or override == str(r.get('Ticker técnico') or '').strip().upper())), None)
+        if match is None:
+            return empty
+        r = candidates.pop(match)
+        day, value = _quote_day(r.get('Data')), _safe_float(r.get('Valor atual EUR'))
+        if day is None or value is None or value <= 0:
+            return empty
+        # A stored EUR valuation is already converted by the quote pipeline.
+        # Never replace an unavailable conversion with 1 or the instrument currency.
+        if str(r.get('Moeda') or '').upper() not in ('EUR','USD','GBP','CHF'):
+            return empty
+        days.add(day)
+        checked.append(r)
+        cost = _safe_float(p.get('Preço médio'))
+        cost_matches = cost_matches and cost is not None and cost > 0 and cost == _safe_float(r.get('Preço médio'))
+
+    def total(field):
+        values = [_safe_float(r.get(field)) for r in checked]
+        return _safe_float(sum(values)) if all(v is not None for v in values) else None
+
+    return (total('Valor atual EUR'), total('P/L EUR aprox.') if cost_matches else None,
+            total('Variação dia EUR') if len(days) == 1 else None, tuple(sorted(days)))
+
+
+def _position_summary(positions, rows):
+    return _position_valuation(positions, rows)[:3]
+
+
+def _valuation_dates(days):
+    if not days:
+        return 'Sem avaliação completa correspondente às posições guardadas.'
+    show = lambda day: day.strftime('%d/%m/%Y')
+    if len(days)==1:
+        return 'Fecho de '+show(days[0])+'.'
+    return 'Últimos fechos por título: '+show(days[0])+' a '+show(days[-1])+'.'
 
 
 def _saved_valuation_gaps(positions, rows):
@@ -4728,19 +4938,80 @@ def _position_links(positions):
                 events = []
             st.write(ticker + ' · ' + (' / '.join(events) or 'Sem datas verificáveis') + ' · Yahoo Finance')
 
-def _portfolio_overview(positions, rows):
-    invested, unrealised, daily = _position_summary(positions, rows)
-    columns = st.columns(4)
-    for col, label, value in zip(columns, ['Valor total da conta', 'Variação da sessão', 'Retorno total', 'Desde janeiro'],
-                                 [None, daily, None, None]):
+def _broker_account_summaries(records):
+    """Use only recorded broker-account balances, never a mix of bank & market data."""
+    if not _balances_readable(records):
+        return {}
+    accounts = {}
+    for r in records:
+        if r.get('Tipo') != 'Corretora':
+            continue
+        name = r['Conta'].strip()
+        group = accounts.setdefault(name.casefold(), {'name':name, 'currency':{}})
+        unit = r['Moeda'].strip().upper()
+        older = group['currency'].get(unit)
+        if older is None or r['Data'] > older[0]['Data']:
+            group['currency'][unit] = [r]
+        elif r['Data'] == older[0]['Data']:
+            older.append(r)
+    summary = {}
+    for key,group in accounts.items():
+        rows = [choices[0] for choices in group['currency'].values()]
+        days = {_quote_day(r['Data']) for r in rows}
+        if any(len(choices)!=1 for choices in group['currency'].values()):
+            total, day, reason = None, None, 'Há saldos duplicados para esta conta.'
+        elif len(days)!=1 or None in days:
+            total, day, reason = None, None, 'Os saldos da conta não são da mesma data verificável.'
+        elif any(r['Caixa'] is None or r['Caixa']<0 or r['Investimentos'] is None or r['Investimentos']<0 for r in rows):
+            total, day, reason = None, None, 'Falta o saldo de caixa ou dos investimentos da conta.'
+        elif any(r['EUR por unidade'] is None or r['EUR por unidade']<=0 or
+                 (r['Moeda'].strip().upper()=='EUR' and r['EUR por unidade']!=1) for r in rows):
+            total, day, reason = None, None, 'Falta um câmbio válido para a data do saldo.'
+        else:
+            total, day = _safe_float(sum((r['Caixa']+r['Investimentos'])*r['EUR por unidade'] for r in rows)), next(iter(days))
+            reason = 'Não foi possível calcular o total.' if total is None else None
+        summary[key] = (group['name'], total, day, reason)
+    return summary
+
+
+def _portfolio_value_cards(positions, rows, scope):
+    invested, _, daily, days = _position_valuation(positions, rows)
+    private = bool(_USERS and st.session_state.get('_app_authenticated') and st.session_state.get('_owner_id'))
+    brokers = _broker_account_summaries(st.session_state.get('finance_balances', [])) if private and st.session_state.get('_persistence_read_ok') is True else {}
+    selected = next(iter(brokers)) if len(brokers)==1 else None
+    if len(brokers)>1:
+        selected = st.selectbox('Conta de corretora a mostrar', list(brokers), index=None,
+                                format_func=lambda key: brokers[key][0], key='finance_broker_value_account_'+scope)
+    account = brokers.get(selected)
+    cells = st.columns(3)
+    for col, label, value in zip(cells, ['Valor das posições', 'Valor total da conta', 'Variação da sessão'],
+                                 [invested, account[1] if account else None, daily]):
         col.metric(label, _v31_money(value) if value is not None else 'N/D')
+    cells[0].caption(_valuation_dates(days)+' Exclui dinheiro em conta.')
+    if account and account[1] is not None:
+        cells[1].caption(f'{account[0]} · saldo registado em {account[2]:%d/%m/%Y} · caixa + investimentos registados, sem descontar dívidas nem somar novamente as posições.')
+    elif account:
+        cells[1].caption(f'{account[0]} · {account[3]}')
+    elif brokers:
+        cells[1].caption('Seleciona a corretora para ver o saldo registado.')
+    else:
+        cells[1].caption('Em Património, regista o saldo de caixa e o dos investimentos da corretora na mesma data. O histórico de movimentos não dá o saldo corrente.')
+    if scope=='open' and (not account or account[1] is None):
+        cells[1].button('Abrir Património',on_click=_open_area,args=('Património',),key='finance_open_broker_value')
+    cells[2].caption(f'Fecho de {days[0]:%d/%m/%Y}, não é a variação de hoje.' if daily is not None and days[0] != datetime.now(timezone.utc).date()
+                     else 'Variação das posições, sem fluxos da conta.' if daily is not None else 'Só disponível para um fecho comum a todas as posições.')
+
+
+def _portfolio_overview(positions, rows, *, value_cards=True):
+    invested, unrealised, _ = _position_summary(positions, rows)
+    if value_cards:
+        _portfolio_value_cards(positions, rows, 'overview')
     with st.expander('Desempenho, movimentos e detalhe das posições'):
         st.write('Valor das posições: ' + _v31_money(invested))
         st.write('Ganhos/perdas por realizar (aprox.): ' + _v31_money(unrealised))
-        st.caption('Totais indisponíveis se faltar uma posição, cotação ou conversão. O valor das posições exclui dinheiro em conta. O resultado por realizar usa o câmbio do snapshot.')
-        st.write('Valor total da conta: N/D · falta o saldo de caixa verificado.')
+        st.caption('Totais indisponíveis se faltar uma posição, cotação ou conversão. O valor das posições exclui dinheiro em conta. O resultado por realizar exige o preço médio correspondente.')
         st.write('Retorno total e desempenho no ano: N/D · faltam avaliações históricas e fluxos externos datados.')
-        st.write('Realizado, dividendos recebidos, comissões, taxas e impostos pagos e depósitos: N/D · a carteira guarda posições e decisões, sem extrato completo de movimentos liquidados.')
+        st.write('Realizado, dividendos recebidos, comissões, taxas, impostos e depósitos: consulta o histórico de movimentos quando disponível; não são deduzidos da lista de posições.')
         if rows:
             moves = [r for r in rows if _safe_float(r.get('Variação dia %')) is not None]
             if moves:
@@ -5283,7 +5554,7 @@ def _open_area(area, detail=None):
 
 
 # Nome novo evita reutilizar o módulo anterior nas sessões Streamlit existentes.
-import gestor_views_337 as views
+import gestor_views_339 as views
 
 areas = ['Início','Carteira','Património','Dividendos','Distribuição','Desempenho','Pontuação','Mais']
 section = st.session_state.get('ui_navigation', 'Início')
@@ -5400,8 +5671,11 @@ elif PAGE == 'Alertas e partilha':
         st.code(f'Rever {ticker} se o preço atingir {threshold:.2f} EUR.')
 elif PAGE == 'Vista de carteira':
     if not failed:
-        views.render(view_index, views.matched(positions,rows), _holding_detail, _holding_calendar, resolve_instrument, price_data)
+        views.render(view_index, views.matched(positions,rows), _holding_detail, _holding_calendar, resolve_instrument, price_data,
+                     cash_store=(_xtb_store_ready(), _xtb_saved_for_view, _xtb_save_reviewed))
 elif PAGE == 'Posições':
+    if not failed:
+        _portfolio_value_cards(positions, rows, 'open')
     search = st.text_input('Pesquisar por ticker ou nome').casefold().strip()
     kind = st.selectbox('Tipo', ['Todos','Ação','ETF','ETN','CFD'])
     layout = st.radio('Apresentação',['Grelha','Lista','Tabela'],horizontal=True)
@@ -5443,7 +5717,7 @@ elif PAGE == 'Posições':
             st.write('Última avaliação guardada por posição')
             st.dataframe(pd.DataFrame(rows).reindex(columns=[k for k in columns if any(k in r for r in rows)]), hide_index=True)
         if positions:
-            _portfolio_overview(positions, rows)
+            _portfolio_overview(positions, rows, value_cards=False)
 elif PAGE == 'Briefing completo':
     _v31_render_today()
 elif PAGE == 'Património' or PAGE == 'Fecho mensal':
@@ -5504,33 +5778,66 @@ elif PAGE == 'Carteira':
                     st.error(f'Não foi possível adicionar: {e}')
 
     with st.expander('Importar / exportar'):
-        up=st.file_uploader('Carregar carteira CSV',type=['csv'],key='v14_port_upload')
-        if up is not None and st.button('Importar CSV',key='v14_port_import'):
-            try:
-                imp=pd.read_csv(up)
-                if not {'Ticker XTB','Quantidade','Preço médio'}.issubset(imp.columns):
-                    st.error('O CSV precisa de: Ticker XTB, Quantidade e Preço médio.')
-                else:
-                    if 'Tipo instrumento' not in imp.columns:
-                        imp['Tipo instrumento']='Auto'
-                    if 'Ticker técnico' not in imp.columns:
-                        imp['Ticker técnico']=''
-                    if 'Multiplicador contrato' not in imp.columns:
-                        imp['Multiplicador contrato']=0.0
-                    imp['Tipo instrumento']=imp['Tipo instrumento'].apply(_normalize_instrument_type)
-                    cfd_rows=imp[imp['Tipo instrumento'].eq('CFD')]
-                    if not cfd_rows.empty:
-                        tickers=', '.join(cfd_rows['Ticker XTB'].astype(str).tolist()[:8])
-                        st.error(f'O mandato Casa 60k não permite CFDs. Remove estes instrumentos do CSV antes de importar: {tickers}.')
-                    else:
-                        st.session_state.portfolio_input=imp.to_dict('records')
-                        save_persistent_state(show_error=True)
-                        st.success('Carteira importada e guardada. Tipos aceites no mandato: Auto, Ação, ETF ou ETN.')
-            except Exception as e:
-                st.error(str(e))
-        pexport=pd.DataFrame(st.session_state.portfolio_input)
+        from position_import_v1 import confirmation_digest, plan_import, read_positions_csv
+        st.caption('CSV de posições com Ticker XTB, Quantidade e Preço médio. Para Excel de movimentos da XTB, usa Dividendos.')
+        old_positions=_json_safe(st.session_state.portfolio_input)
+        pexport=pd.DataFrame(old_positions)
         if not pexport.empty:
-            st.download_button('Descarregar carteira CSV',pexport.to_csv(index=False).encode('utf-8'),'minha_carteira.csv','text/csv',use_container_width=True)
+            st.download_button('Descarregar carteira CSV',pexport.to_csv(index=False).encode('utf-8'),
+                               'minha_carteira.csv','text/csv',use_container_width=True)
+        mode = st.radio('Operação com o CSV',['add','replace'],horizontal=True,key='positions_csv_mode',
+                        format_func=lambda x: 'Acrescentar posições novas' if x=='add' else 'Substituir toda a carteira')
+        if mode=='add':
+            st.caption('Se um título já existir, a quantidade, o preço médio e os restantes dados guardados ficam como estão. Usa Adicionar posição para reforços manuais.')
+        else:
+            st.warning('O CSV substituirá toda a lista de posições. Descarrega primeiro uma cópia da carteira atual.')
+        up=st.file_uploader('Carregar carteira CSV',type=['csv'],key='positions_csv_upload')
+        source_id = up.file_id if up is not None else None
+        if st.button('Pré-visualizar posições do CSV',key='positions_csv_prepare',disabled=not up):
+            st.session_state.pop('positions_csv_preview',None)
+            try:
+                parsed,ignored=read_positions_csv(up.getvalue(),instrument_identity)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state['positions_csv_preview']=(source_id,parsed,ignored)
+        draft=st.session_state.get('positions_csv_preview')
+        if draft and source_id and draft[0]==source_id:
+            planned,new,skipped=plan_import(old_positions,draft[1],mode,instrument_identity)
+            diff=planned!=old_positions
+            if draft[2]:
+                st.caption('Colunas fora do modelo não são importadas: '+', '.join(draft[2][:10]))
+            nold,nnew,nskipped=len(old_positions),len(new),len(skipped)
+            if mode=='add':
+                additions='1 posição nova' if nnew==1 else f'{nnew} posições novas'
+                unchanged='1 título já existente não será alterado' if nskipped==1 else f'{nskipped} títulos já existentes não serão alterados'
+                st.write(f'{additions} · {unchanged}.')
+            else:
+                st.write(f'Posições atuais: {nold} · posições do CSV que ficarão guardadas: {nnew}.')
+            if new:
+                table=pd.DataFrame([{**r,'Ação':'Acrescentar' if mode=='add' else 'Substituir lista'} for r in new])
+                st.dataframe(table[['Ticker XTB','Quantidade','Preço médio','Tipo instrumento','Ação']],hide_index=True)
+            if skipped:
+                st.caption('Mantidos sem alterações: '+', '.join(r['Ticker XTB'] for r in skipped[:25])+('…' if nskipped>25 else ''))
+            if diff:
+                st.caption('Não serão importados saldos, avaliações ou câmbios. As avaliações guardadas não são apagadas; posições novas podem ficar por avaliar.')
+            if not _position_import_ready():
+                st.info('A pré-visualização está disponível. Para guardar, entra com a tua conta individual e confirma que o armazenamento está ligado.')
+            lock=source_id+'_'+mode+'_'+confirmation_digest(old_positions)
+            label = 'Conferi as posições novas e quero acrescentá-las' if mode=='add' else 'Conferi e quero substituir toda a carteira'
+            ok = st.checkbox(label,key='positions_csv_review_'+lock,disabled=not diff)
+            if st.button('Confirmar e guardar posições' if mode=='add' else 'Confirmar e substituir toda a carteira',
+                         key='positions_csv_commit_'+mode,disabled=not(diff and ok and _position_import_ready())):
+                try:
+                    _store_reviewed_positions(old_positions,planned)
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state.pop('positions_csv_preview',None)
+                    if mode=='add':
+                        st.success('1 posição acrescentada e guardada.' if nnew==1 else f'{nnew} posições acrescentadas e guardadas.')
+                    else:
+                        st.success('Carteira substituída e guardada.')
 
     if st.session_state.portfolio_input:
         if st.button('Atualizar carteira',type='primary',use_container_width=True,key='v14_port_refresh'):
@@ -5544,9 +5851,8 @@ elif PAGE == 'Carteira':
                     out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
                 prog.progress(i/max(len(st.session_state.portfolio_input),1),text=f'{i}/{len(st.session_state.portfolio_input)}')
             prog.empty()
-            st.session_state['v14_portfolio_rows']=out
-            _v31_store_snapshot(out)
-            save_persistent_state(show_error=False)
+            if _finish_market_refresh(st.session_state.portfolio_input, out) and persistence_enabled():
+                st.rerun()
 
         prow=st.session_state.get('v14_portfolio_rows',[])
         if prow:
@@ -5685,10 +5991,11 @@ elif PAGE == 'Risco':
                     out.append({'Ticker XTB':str(r.get('Ticker XTB','')),'Erro':str(e)})
                 prog.progress(i/max(len(st.session_state.portfolio_input),1),text=f'{i}/{len(st.session_state.portfolio_input)}')
             prog.empty()
-            st.session_state['v14_portfolio_rows']=out
-            _v31_store_snapshot(out)
+            st.session_state['risk_market_preview']=(tuple(repr(p) for p in st.session_state.portfolio_input), out)
 
-        rows=st.session_state.get('v14_portfolio_rows',[])
+        risk_preview=st.session_state.get('risk_market_preview')
+        signature=tuple(repr(p) for p in st.session_state.portfolio_input)
+        rows=(risk_preview[1] if risk_preview and risk_preview[0]==signature else st.session_state.get('v14_portfolio_rows',[]))
         good=[r for r in rows if isinstance(r,dict) and r.get('_analysis')]
         bad=[r for r in rows if isinstance(r,dict) and r.get('Erro')]
         if good:
